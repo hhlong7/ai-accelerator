@@ -35,32 +35,32 @@ class Kernel:
         if self.queue < 0:
             raise ValueError(f"Inval kernel {self.kernel_id} because queue time {self.queue} must be >= 0")
 
-        @property
-        def fpops_per_byte(self):
-            return self.fpop / self.moved_bytes #if high then compute the bound, if low then memory bound
+    @property
+    def fpops_per_byte(self):
+        return self.fpop / self.moved_bytes #if high then compute the bound, if low then memory bound
 
-        def can_run_on(self, kind):
-            if kind == cpu:
-                return True
-            if kind == accelerator and self.kernel_type == general_mat_mul_kernel:
-                return True
-            return False
+    def can_run_on(self, kind):
+        if kind == cpu:
+            return True
+        if kind == accelerator and self.kernel_type == general_mat_mul_kernel:
+            return True
+        return False
 
-        @property
-        def done(self):
-            return self.remaining is not None
+    @property
+    def done(self):
+        return self.finish is not None
 
-        @property
-        def latency(self):
-            if self.finish is None:
-                return None
-            return self.finish - self.queue     #computin the time from when k was queued to when it finsiehd
+    @property
+    def latency(self):
+        if self.finish is None:
+            return None
+        return self.finish - self.queue     #computin the time from when k was queued to when it finsiehd
 
-        @property
-        def wait(self):
-            if self.start is None:
-                return None
-            return self.start - self.queue   #computing the time from when k was queued to when it started running
+    @property
+    def wait(self):
+        if self.start is None:
+            return None
+        return self.start - self.queue   #computing the time from when k was queued to when it started running
 
 
 #general mat mul (gmm): (m x k) @ (k x n) = (m x n)
@@ -73,7 +73,7 @@ def make_gmm_kernel(kernel_id, m, k, n, arrival, dtype_bytes=2):
     c_bytes = m * n *dtype_bytes #out
 
     tot = a_bytes + b_bytes + c_bytes
-    return Kernel(kernel_id=kernel_id, kernel_type=general_mat_mul_kernel, queue=arrival,fpop=fpop, moved_bytes=total, work_set=total, dim=(m, k, n), dtype_bytes=dtype_bytes)
+    return Kernel(kernel_id=kernel_id, kernel_type=general_mat_mul_kernel, queue=arrival,fpop=fpop, moved_bytes=tot, work_set=tot, dim=(m, k, n), dtype_bytes=dtype_bytes)
 
 
 #simple kernels, read n inputs arryas, write 1 output arry
