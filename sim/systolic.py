@@ -1,10 +1,12 @@
 """
-this is for the timing of the systolic array accelerator (weight stationary) running a general mat mul
-(m x k) @ (k x n) = (m x n). the weights (k x n) dont fit in the rows x cols array all at once so they
-are cut into tiles, each tile is 2 phases:
-- load: bring the tile of weights from memory to the array, bandwidth heavy
-- compute: stream the m input rows thru the array, m + rows + cols cycles (streaming + fill/drain)
-the list of phases is the bandwidth demand profile that step 1.4 uses.
+this is for the timing of the systolic array. it runs a mat mul
+(m x k) @ (k x n) = (m x n). the weigths (k x n) are cut into
+"tiles" bc they dont fit in the rows x cols array all at once. each tile is 2 phases:
+each tile is 2 phases:
+    - Load: bring tile from mem into array; bandwidth heavy
+    - Compute: stream the m input rows thru the array, m + rows + cols cycles
+
+
 
 assumptions of this model:
 - tiles go n tile by n tile, and for each n tile thru all the k tiles. the partial sums stay on the accel
@@ -13,6 +15,7 @@ assumptions of this model:
   other n tiles, if not its re-fetched for every tile
 - the tiles on the edge only move the bytes they use but still take the full m + rows + cols cycles
 - load has 0 cycles, its time only depends on the bandwidth it gets
+
 """
 
 import math
