@@ -17,7 +17,7 @@ import heapq
 queued = "queued"
 finished = "finished"
 
-class engine:
+class Engine:
     def __init__(self):
         self.event_queue = [] #use heap
         self.current_time = 0.00
