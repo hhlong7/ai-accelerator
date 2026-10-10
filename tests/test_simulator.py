@@ -153,3 +153,24 @@ def test_stuck_kernels_raise():
     sim.submit([mem_bound(0, 0.00)])
     with pytest.raises(RuntimeError):
         sim.run()
+
+
+#kernels arriving at the same time => the policy is asked once, after all of them arrived,
+#so it doesnt decide on the 1st one thinking its alone
+def test_same_time_arrivals_picked_together():
+    class Recording(Fixed):
+        def __init__(self, where):
+            super().__init__(where)
+            self.first_pick = None  #what was waiting the 1st time pick was called
+
+        def pick(self, sim):
+            if self.first_pick is None:
+                self.first_pick = [k.kernel_id for k in self.waiting]
+            return super().pick(sim)
+
+    policy = Recording({0: cpu, 1: cpu, 2: accelerator, 3: cpu})
+    sim = Simulator(make_system(), policy)
+    sim.submit([mem_bound(0, 0.00), mem_bound(1, 0.00), make_gmm_kernel(2, 10, 32, 32, arrival=0.00),
+                mem_bound(3, 50.00)])   #k3 comes later => not part of the 1st pick
+    sim.run()
+    assert policy.first_pick == [0, 1, 2]

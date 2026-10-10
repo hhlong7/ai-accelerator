@@ -26,19 +26,23 @@ class HeftGreedy(Policy):
     def __init__(self):
         self.waiting = [] # empty array, kernels not started
         self.running = [] # kernels that started, not finished
-        self.picks = [] # what pick() is starting so far
+        # what pick() is starting so far. contention_aware.py reads this while estimating,
+        # so kernels picked earlier in the same pick() count as competitors for bandwidth
+        self.picks = []
+        self.seg_cache = {} # {(kernel_id, kind): segments}, a kernel's segments never change
 
     def on_queued(self, kernel, sim):
         self.waiting.append(kernel)
 
-    def fits_accel(self, kernel, sim):
-        return kernel.can_run_on(accelerator) and kernel.dtype_bytes == sim.config.accelerator.dtype_bytes
-
-    # uses model.py segments
+    # uses model.py segments, cached so big gemms arent re-tiled on every pick
     def segs(self, kernel, kind, sim):
-        if kind == cpu:
-            return cpu_segs(kernel, sim.cpu, 1)
-        return accelerator_segs(kernel, sim.accelerator)
+        key = (kernel.kernel_id, kind)
+        if key not in self.seg_cache:
+            if kind == cpu:
+                self.seg_cache[key] = cpu_segs(kernel, sim.cpu, 1)
+            else:
+                self.seg_cache[key] = accelerator_segs(kernel, sim.accelerator)
+        return self.seg_cache[key]
 
     # calc how long kernel takes on this resource
     def estimate_ns(self, kernel, kind, sim):

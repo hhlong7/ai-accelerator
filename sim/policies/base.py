@@ -17,11 +17,17 @@ what the policy can read from sim:
 - sim.config: the SystemConfig (cores, accelerator, memory)
 """
 
+from sim.kernels import accelerator
+
 
 class Policy:
     #called once when a kernel arrives
     def on_queued(self, kernel, sim):
         pass
+
+    #can this kernel go on the accelerator (gemm only, and same dtype as the array)
+    def fits_accel(self, kernel, sim):
+        return kernel.can_run_on(accelerator) and kernel.dtype_bytes == sim.config.accelerator.dtype_bytes
 
     #called after every arrival and kernel finish, returns [(kernel, kind, num_cores), ...] to start now
     def pick(self, sim):
