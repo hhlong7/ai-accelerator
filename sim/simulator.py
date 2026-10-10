@@ -59,10 +59,16 @@ class Simulator:
                 raise RuntimeError(f"The kernels: {stuck} never finished, the policy never started them")
         return end
 
+    #more kernels arriving at this same time => wait and let the policy see all of them at once
+    def more_arrivals_now(self):
+        q = self.engine.event_queue
+        return bool(q) and q[0][0] == self.now and q[0][2] == queued
+
     def on_queued(self, eng, kernel):
         self.advance_jobs()
         self.policy.on_queued(kernel, self)
-        self.start_picked()
+        if not self.more_arrivals_now():
+            self.start_picked()
         self.reallocate()
 
     def on_segment_done(self, eng, job):

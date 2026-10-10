@@ -27,9 +27,8 @@ class Fifo(Policy):
 
         while self.waiting:
             kernel = self.waiting[0]
-            fits_accel = kernel.can_run_on(accelerator) and kernel.dtype_bytes == sim.config.accelerator.dtype_bytes
 
-            if accel_free and fits_accel:
+            if accel_free and self.fits_accel(kernel, sim):
                 picks.append((kernel, accelerator, None))
                 accel_free = False
             elif free_cores > 0:

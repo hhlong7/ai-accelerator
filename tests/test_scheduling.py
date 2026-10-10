@@ -1,7 +1,7 @@
 import pytest
 
 from sim.config import CoreConfig, AcceleratorConfig, MemoryConfig, SystemConfig
-from sim.kernels import make_gmm_kernel, make_simple_kernel, cpu, accelerator
+from sim.kernels import make_gmm_kernel, make_simple_kernel, cpu, accelerator, general_mat_mul_kernel, simple
 from sim.simulator import Simulator
 from sim.policies.fifo import Fifo
 from sim.policies.heft_greedy import HeftGreedy
@@ -101,8 +101,9 @@ def test_heft_is_blind_to_contention():
 
 
 #contention aware at the same moment, t = 757.2:
-#it sees k0 and k1 are 32.55% from done at their current rate => cores busy till 1043.2
-#k3 on a core: 3 kernels share the bandwidth, 2176 bytes / 3.33 GB/s = 652.8 => 1043.2 + 652.8 = 1696.0
+#it sees k0 and k1 are 32.55% from done, and with k2 gone they get 5 GB/s each => cores busy till
+#757.2 + 0.3255 * 800 = 1017.6 (busy_until uses the fresh shares, not the old 4.55 GB/s)
+#k3 on a core: 3 kernels share the bandwidth, 2176 bytes / 3.33 GB/s = 652.8 => 1017.6 + 652.8 = 1670.4
 #k3 on the accelerator: load 614.4 + compute 142.8 = 757.2 => 757.2 + 757.2 = 1514.4
 #=> it picks the accelerator and starts right away
 def test_contention_aware_sees_the_contention():
@@ -117,7 +118,7 @@ def test_qilin_without_history_is_heft():
     policy = QilinStyle()
     k = run(policy, gemm_heavy())
     assert where(k) == [accelerator, accelerator, accelerator, cpu, cpu]
-    assert policy.fit == {cpu: None, accelerator: None} #every kernel on a resource had the same size
+    assert policy.fit == {} #every kernel of a type on a resource had the same size => no line yet
 
 
 #2 points (fpop 1000, 500 ns) and (fpop 3000, 1500 ns) => line: time = 0.5 * fpop
@@ -133,7 +134,22 @@ def test_qilin_fits_a_line_to_history():
         policy.learn(done, sim)
 
     assert policy.estimate_ns(new, cpu, sim) == pytest.approx(1000.0)   #0.5 * 2000
-    assert policy.fit[accelerator] is None  #the accelerator has no history yet
+    assert (cpu, simple) in policy.fit
+    assert (accelerator, general_mat_mul_kernel) not in policy.fit  #the accelerator has no history yet
+
+
+#the line from simple kernels is NOT used for a gemm on the same resource (1 line per kernel type)
+#gemm (10 x 32) @ (32 x 32) on a core: still the standalone estimate 2048 ns, not 0.5 * fpop = 10240
+def test_qilin_keeps_kernel_types_apart():
+    policy = QilinStyle()
+    sim = Simulator(make_system(), policy)
+    for kernel_id, n_element, time in [(0, 1000, 500.0), (1, 3000, 1500.0)]:
+        done = make_simple_kernel(kernel_id, n_element, arrival=0.00)
+        done.resource, done.start, done.finish = cpu, 0.00, time
+        policy.learn(done, sim)
+
+    gemm = big_gemm(9)
+    assert policy.estimate_ns(gemm, cpu, sim) == pytest.approx(2048.0)
 
 
 #2 memory bound kernels at t = 0, each really takes 800 ns (test_simulator.py)
@@ -145,6 +161,45 @@ def test_contention_aware_correction():
     assert k[0].finish == pytest.approx(800.0)
     assert policy.correction[cpu] == pytest.approx(1.25)
     assert policy.correction[accelerator] == 1.0    #nothing ran there
+
+
+#contention aware that remembers what busy_until and estimate_ns returned, to check the bug fixes
+class RecordingContentionAware(ContentionAware):
+    def __init__(self):
+        super().__init__()
+        self.busy = []      #(now, kernel_id, busy_until)
+        self.raw = []       #(now, kernel_id, kind, prediction before correction)
+
+    def busy_until(self, kernel, sim):
+        time = super().busy_until(kernel, sim)
+        self.busy.append((sim.now, kernel.kernel_id, time))
+        return time
+
+    def estimate_ns(self, kernel, kind, sim):
+        time = super().estimate_ns(kernel, kind, sim)
+        self.raw.append((sim.now, kernel.kernel_id, kind, self.predicted[kernel.kernel_id][kind]))
+        return time
+
+
+#bug fix: busy_until uses the fresh bandwidth shares. at t = 757.2 k2 just finished, pick runs before
+#the simulator reallocates so k0 and k1 still have the old 4.55 GB/s share. they're 32.55% from done and
+#will get 5 GB/s each => 757.2 + 0.3255 * 800 = 1017.6 (with the old share it said 1043.2)
+def test_contention_aware_busy_until_uses_fresh_bandwidth():
+    policy = RecordingContentionAware()
+    run(policy, mixed())
+    at_k2_finish = [time for now, kid, time in policy.busy if now == pytest.approx(757.2) and kid in (0, 1)]
+    assert len(at_k2_finish) == 2
+    assert all(time == pytest.approx(1017.6) for time in at_k2_finish)
+
+
+#bug fix: a kernel finishing at the same time isn't a competitor. at t = 1147.8 k0 and k1 both finish,
+#k1's event hasnt been processed yet when k4 is estimated. k4 only shares with k3 on the accelerator
+#=> 5 GB/s => 4000 bytes / 5 GB/s = 800 (counting k1 too it said 1200)
+def test_contention_aware_ignores_kernels_finishing_now():
+    policy = RecordingContentionAware()
+    run(policy, mixed())
+    k4_on_cpu = [raw for now, kid, kind, raw in policy.raw if now == pytest.approx(1147.8) and kid == 4 and kind == cpu]
+    assert k4_on_cpu and all(raw == pytest.approx(800.0) for raw in k4_on_cpu)
 
 
 #every policy has to start and finish every kernel on both workloads
