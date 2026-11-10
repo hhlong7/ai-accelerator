@@ -1,23 +1,41 @@
-# Cache and Bandwidth Contention in Shared-Memory CPU–Accelerator SoCs
+# Contention-Aware Scheduling for Shared-Memory CPU–Accelerator SoCs
 
-**CPE 5300 Course Project — Implementation Plan (Tiers 1–4)**
+**CPE 5300 Course Project — Implementation Plan (Tiers 1–3)**
 
 ## Research question
 
-In a shared-memory SoC where CPU cores and a systolic-array accelerator compete for the last-level cache (LLC) and DRAM bandwidth, how much contention can be recovered by **scheduling** (where/when kernels run) versus **hardware partitioning** (LLC way-partitioning), and how does the answer change with accelerator size and memory configuration? The contention-aware scheduler is framed as an **on-chip hardware dispatch unit**, implemented in SystemVerilog and synthesized for area/timing.
+In a shared-memory SoC where CPU cores and a systolic-array accelerator compete for DRAM bandwidth, can a scheduler that models this contention produce better schedules than existing heterogeneous schedulers that ignore it, and what would it cost to run as an **on-chip dispatch unit**? We compare FIFO, HEFT, Qilin, Xu 2023 (ESHCS) and a HaX-CoNN-style policy against a **new contention-aware algorithm** (dynamic-programming allocation + greedy dispatch + contention heuristics), measure how close each one gets to the optimal schedule, and estimate each algorithm's hardware cost. The answer is studied across accelerator sizes and memory bandwidths.
 
-Project type (syllabus): *compare existing ideas that have not been directly compared* + *initial study of a new idea* (the dispatch unit).
+Project type (syllabus): *compare existing ideas that have not been directly compared* + *initial study of a new idea* (the contention-aware algorithm).
+
+Goal metric: **schedule quality** (makespan and latency under contention) first; scheduling overhead (time per decision) second.
+
+## Scope change (2026-11-09)
+
+With about 5 weeks left, the scope is cut to the simulator, the new algorithm, and an analytical hardware cost:
+- **Shared LLC and partitioning** (old Tier 2): moved to Future work (Phase 4).
+- **SystemVerilog dispatch unit** (old Tier 4): moved to Future work (Phase 4), replaced by the analytical hardware cost in Tier 3.
+- The architecture side of the project comes from the contention model (shared DRAM bandwidth, memory-bound vs. compute-bound systolic array), the design-space sweep (array size, scratchpad, bandwidth), and the hardware cost of each scheduler.
 
 ## Tier overview
 
 | Tier | Scope | Experiments enabled |
 |---|---|---|
-| **1 — Core** | Event engine, cores, phase-based systolic accelerator, DRAM bandwidth contention (grounded in C measurements), baseline policies (FIFO, HEFT, Qilin, Xu 2023, HaX-CoNN-style) + contention-aware policy, workloads, metrics, sweeps | E1 characterization, E2 scheduling-only, E5 design-space sweep |
-| **2 — Shared LLC** | Capacity-based LLC model with miss-rate curves, way-partitioning (static + utility-based), contention tracking as an alternative to partitioning, optional bandwidth throttling, LLC→DRAM coupling | E3 memory-side only, E4 scheduling × memory-side |
-| **3 — Energy + HW dispatch** | Energy model; contention-aware policy recast as a hardware dispatch unit built from published hardware schedulers (HW HEFT_RT, HTS) with MoCA-style bandwidth counters (fixed-point golden model, bounded tables, decision latency, analytical cost) | E6 energy; dispatch-latency sensitivity |
-| **4 — RTL (stretch)** | SystemVerilog dispatch unit, co-simulation against Python golden model, Yosys synthesis, compared against HW HEFT_RT | Area/timing table vs. HW HEFT_RT; measured latency fed back into simulator |
+| **1 — Core** | Event engine, cores, phase-based systolic accelerator, DRAM bandwidth contention (grounded in C measurements), task dependencies, DNN-chain and DAG workloads, baseline policies (FIFO, HEFT, Qilin, Xu 2023, HaX-CoNN-style) + contention-aware policy, optimal schedule and lower bounds, metrics, sweeps | E1 characterization, E2 scheduling comparison, E5 design-space sweep |
+| **2 — New algorithm** | DP allocation + greedy dispatch + contention heuristics ("cost I cause others", compute/memory pairing), built and measured one piece at a time | E3 quality vs. baselines and optimal, E4 ablation, E5 extended |
+| **3 — Hardware cost + energy** | Analytical hardware cost of every scheduler (operations per decision, state, decision latency, dispatch-unit feasibility) vs. HW HEFT_RT; dispatch-latency sensitivity; energy model (optional) | E6 overhead and hardware cost, E7 energy (optional) |
 
 Each tier ends with a complete, writable paper. Never start a tier until the previous tier's validation passes.
+
+## Schedule (5 weeks)
+
+| Week | Work |
+|---|---|
+| 1 (Nov 9) | Dependencies in the simulator; 1.9 chain and DAG workloads; 1.10 metrics; start `xu2023.py` |
+| 2 (Nov 16) | `xu2023.py`, `haxconn_style.py`, `optimal.py` + lower bounds; 1.11 harness; first E1/E2 runs; 1.7 measurements in parallel |
+| 3 (Nov 23, short week) | Tier 2: cost model, DP allocation, greedy dispatch; first E3 results |
+| 4 (Nov 30) | Tier 2 heuristics, E4 ablation, E5 sweep; Tier 3 hardware cost table |
+| 5 (Dec 7) | Final experiments, paper, presentation |
 
 ## Languages and tools
 
@@ -25,7 +43,6 @@ Each tier ends with a complete, writable paper. Never start a tier until the pre
 |---|---|
 | Simulator, policies, workloads, metrics, experiments, plots | Python 3.13 (numpy, scipy, pandas, matplotlib, pytest) |
 | Bandwidth + co-run measurements | C with OpenMP (STREAM-style); accelerator load via PyTorch MPS or Accelerate `cblas_sgemm` |
-| Dispatch unit RTL | SystemVerilog; Verilator (sim + co-sim), Yosys (synthesis), OpenSTA (timing, optional) |
 
 ## Repository layout (target)
 
@@ -35,38 +52,28 @@ sim/
   kernels.py           # Kernel, make_gmm_kernel, make_simple_kernel
   cores.py             # Core, CPU, Accelerator (standalone time)
   systolic.py          # weight-stationary systolic timing + per-phase traffic
-  memory.py            # DRAM bandwidth allocation (Tier 1), LLC model (Tier 2)
+  memory.py            # DRAM bandwidth allocation
   model.py             # rate model: Segment, Job
-  simulator.py         # event loop: advance -> change -> reallocate, policy hooks
+  simulator.py         # event loop: advance -> change -> reallocate, policy hooks, dependencies
   config.py            # hardware/system configuration dataclasses
-  energy.py            # Tier 3
+  energy.py            # Tier 3 (optional)
+  hw_cost.py           # Tier 3: analytical hardware cost per scheduler
   policies/
     base.py                  # Policy interface (on_queued, pick)
     fifo.py
     heft_greedy.py           # StarPU-style
     qilin_style.py
-    xu2023.py                # recent same-problem baseline (1.8)
+    xu2023.py                # ESHCS, recent same-problem baseline (1.8)
     haxconn_style.py         # HaX-CoNN cost model + PCCS-style slowdown (1.8)
     contention_aware.py      # software form (Tier 1)
-    dispatch_unit_model.py   # fixed-point hardware golden model (Tier 3)
-  partition/
-    static.py
-    ucp.py                   # utility-based LLC partitioning (Tier 2)
-    tracking.py              # contention tracking instead of partitioning (Tier 2)
-    throttle.py              # MoCA-style bandwidth throttling (Tier 2, optional)
+    optimal.py               # exact schedule + lower bounds on small DAGs (1.8)
+    contention_dp.py         # new algorithm (Tier 2)
   workload.py
   metrics.py
 bench/
   stream_corun.c
   Makefile
   run_measurements.sh
-rtl/                   # Tier 4
-  dispatch_unit.sv
-  kernel_queue.sv
-  history_table.sv
-  bw_monitor.sv
-  tb/
-  synth/
 experiments/
   configs/             # YAML/py configs per experiment
   run_experiment.py
@@ -92,22 +99,22 @@ paper/
 | 0.2 | `sim/config.py`: dataclasses for every hardware parameter (core count, core GFLOP/s, array rows/cols, clock, scratchpad size, LLC size/ways, DRAM BW, …) with documented defaults and sources | One place to change any parameter; no magic numbers elsewhere |
 | 0.3 | Pick reference platform numbers (e.g., Apple M-series / AMD APU: LLC size, DRAM BW, core count) and cite them | Defaults table with citations |
 | 0.4 | Read the related work below and write one note per paper (problem, mechanism, evaluation, how we differ, what we reuse) | Notes written; `paper/refs.bib` filled |
-| 0.5 | Instructor check-in: confirm scope, tiers, and that the dispatch unit + RTL framing is acceptable | Notes recorded |
+| 0.5 | Instructor check-in: confirm the reduced scope (algorithm focus; LLC partitioning and RTL moved to future work) is acceptable | Notes recorded |
 
 ### 0.4 Reading list
 
 | Paper | Venue | Reader | Used in |
 |---|---|---|---|
-| Efficient tasks scheduling in multicore systems integrated with hardware accelerators (Xu, Shi, Chen) | J. Supercomputing 2023 | you | 1.8 `xu2023.py` baseline; task model for 1.9 |
+| Efficient tasks scheduling in multicore systems integrated with hardware accelerators (Xu, Shi, Chen) | J. Supercomputing 2023 | you | 1.8 `xu2023.py` baseline; DAG workloads for 1.9; 2.1 weaknesses the new algorithm targets |
 | PCCS: Processor-Centric Contention-aware Slowdown Model for Heterogeneous System-on-Chips (Xu, Belviranli, Shen, Vetter) | MICRO 2021 | you | 1.7 measurements; 1.8 `haxconn_style.py` (its contention model); E1 comparison |
 | Shared Memory-contention-aware Concurrent DNN Execution for Diversely Heterogeneous System-on-Chips, "HaX-CoNN" (Dagli, Belviranli) | PPoPP 2024 | you | 1.8 `haxconn_style.py` baseline; 1.9 layer dependencies; 1.10 metrics |
-| A Hardware-based HEFT Scheduler Implementation for Dynamic Workloads on Heterogeneous SoCs (Fusco, Hassan, Mack, Akoglu) | VLSI-SoC 2022 | you | 3.2 template; 3.4 cost metrics; 4.4 comparison point (9.144 ns) |
-| HTS: A Hardware Task Scheduler for Heterogeneous Systems | arXiv 2019 | you | 3.2 queue and select logic; 4.1 module design |
-| MoCA: Memory-Centric, Adaptive Execution for Multi-Tenant Deep Neural Networks (Kim et al.) | HPCA 2023 | partner | 2.5 optional throttling; 3.2 bandwidth monitors; 4.1 `bw_monitor.sv` |
-| Hardware support for contention tracking in CPU and GPU last-level cache | JSA 2025 | partner | 2.4 tracking vs. partitioning; 3.4 cost reference |
-| Characterizing Mobile SoC for Accelerating Heterogeneous LLM Inference | 2025 | partner | 1.7 measurement method; 2.2/2.3 parameter justification |
-| A fully hardware-managed scheduling architecture for AI accelerators | Springer 2026 | partner | 3.2 dependency tracking (if 1.9 adds dependencies); 4.1 module design |
-| Qureshi & Patt, Utility-Based Cache Partitioning (UCP) | MICRO 2006 | partner | 2.4 dynamic partitioning |
+| A Hardware-based HEFT Scheduler Implementation for Dynamic Workloads on Heterogeneous SoCs (Fusco, Hassan, Mack, Akoglu) | VLSI-SoC 2022 | you | 3.1 hardware cost metrics and comparison point (9.144 ns) |
+| HTS: A Hardware Task Scheduler for Heterogeneous Systems | arXiv 2019 | you | 3.1 dispatch-unit feasibility (queue and select logic) |
+| MoCA: Memory-Centric, Adaptive Execution for Multi-Tenant Deep Neural Networks (Kim et al.) | HPCA 2023 | partner | 3.1 bandwidth counters the algorithm needs; 4.1 throttling (future work) |
+| Hardware support for contention tracking in CPU and GPU last-level cache | JSA 2025 | partner | 3.1 cost reference; 4.1 tracking vs. partitioning (future work) |
+| Characterizing Mobile SoC for Accelerating Heterogeneous LLM Inference | 2025 | partner | 1.7 measurement method; 0.3 parameter justification |
+| A fully hardware-managed scheduling architecture for AI accelerators | Springer 2026 | partner | 3.1 dependency tracking cost in hardware |
+| Qureshi & Patt, Utility-Based Cache Partitioning (UCP) | MICRO 2006 | partner | 4.1 dynamic partitioning (future work) |
 
 Reading order for you: Xu 2023, PCCS, HaX-CoNN (needed before 1.8 baselines and 1.9), then HW HEFT and HTS (needed before Tier 3).
 
@@ -123,7 +130,7 @@ Reading order for you: Xu 2023, PCCS, HaX-CoNN (needed before 1.8 baselines and 
 - **Validate:** out-of-order events fire in time order; ties fire in schedule order; `data` never compared; cancelled events never fire; handler-scheduled events work.
 
 ### 1.2 Kernels and tasks (`sim/kernels.py`)
-- `Kernel`: id, type (`GEMM`, `CPU_ONLY`, …), dims (M, K, N), arrival time, bytes read/written, working-set size (used in Tier 2), parallelizable flag.
+- `Kernel`: id, type (`GEMM`, `CPU_ONLY`, …), dims (M, K, N), arrival time, bytes read/written, working-set size (kept for future LLC work), parallelizable flag.
 - Runtime fields: assigned resource, start, finish, remaining work.
 - **Validate:** byte/FLOP counts match hand calculation for a few shapes.
 
@@ -163,118 +170,109 @@ Reading order for you: Xu 2023, PCCS, HaX-CoNN (needed before 1.8 baselines and 
 - `heft_greedy.py`: StarPU-style earliest-finish-time using standalone performance models (no contention awareness).
 - `qilin_style.py`: per-resource curve fit on execution history, adaptive split.
 - `contention_aware.py` (software form): predicted finish time *including* current bandwidth contention + history-based correction term.
-- `xu2023.py`: recent same-problem baseline (multicore + accelerators, minimize total execution time, no memory contention). Implemented from the paper; docstring lists every simplification.
+- `xu2023.py`: ESHCS, recent same-problem baseline (multicore + accelerators, minimize total execution time, no memory contention). Implemented from the paper; docstring lists every simplification.
 - `haxconn_style.py`: HaX-CoNN's contention cost model with a PCCS-style slowdown estimate, run inside the online loop (the full SAT/Z3 solver is out of scope; state this).
-- **Validate:** each policy's decisions on a 5-kernel hand-traced workload match expected assignments.
+- `optimal.py`: exact schedule for small DAGs (brute force, or ILP with `scipy.optimize.milp`) plus lower bounds: total bytes / peak DRAM bandwidth, critical path with standalone times, total work / number of resources. Used to report each policy's optimality gap.
+- **Validate:** each policy's decisions on a 5-kernel hand-traced workload match expected assignments; `optimal.py` is never worse than any policy and never below the lower bounds.
 
 ### 1.9 Workloads (`sim/workload.py`)
 - Real layer shapes (e.g., ResNet-50, BERT-base, MobileNet) in `data/layer_shapes/`; CPU-side kernels (pre/post-processing, memory-bound ops).
 - Mixes: accelerator-heavy / balanced / CPU-heavy × low / medium / high contention (arrival rate, sizes).
 - Seeded RNG; identical workloads across policies.
-- Decision (after reading Xu 2023 and HaX-CoNN): keep kernels independent, or add chain dependencies (each DNN is a chain of layers; a layer is released when the previous one finishes). Chains only, not general task graphs.
-- **Validate:** same seed → identical trace; summary stats per mix.
+- Dependencies (decided after reading Xu 2023 and HaX-CoNN): each kernel has a `deps` list and is released once it has arrived and all of its dependencies have finished; the simulator rejects cycles.
+- Two task-graph families: **DNN layer chains** (as in HaX-CoNN) and **DAGs shaped like Xu 2023's** (tree, fork-join, random, FFT, Gaussian elimination). Mix memory-bound and compute-bound kernels so contention matters (when every kernel is memory-bound, makespan = total bytes / bandwidth and no policy can help).
+- **Validate:** same seed → identical trace; summary stats per mix; no kernel starts before its dependencies finish.
 
 ### 1.10 Metrics (`sim/metrics.py`)
-- Makespan (cycles), throughput (kernels or inferences per second, comparable to HaX-CoNN), per-kernel latency (mean, p95, p99), core/accelerator utilization, DRAM bandwidth utilization over time, co-run slowdown.
+- Makespan (cycles), throughput (kernels or inferences per second, comparable to HaX-CoNN), per-kernel latency (mean, p95, p99), core/accelerator utilization, DRAM bandwidth utilization over time, co-run slowdown, optimality gap (vs. `optimal.py` on small DAGs), scheduler running time per decision.
 - **Validate:** metrics on the hand-traced workload match hand values.
 
 ### 1.11 Experiment harness (`experiments/`)
 - Config-driven runner, parameter sweeps, CSV results in `data/results/`, plotting scripts.
 - **E1** characterization: co-run slowdown vs. array size, scratchpad size, DRAM BW; compare the simulator's slowdown against a PCCS-style prediction.
-- **E2** scheduling-only: 6 policies (FIFO, HEFT, Qilin, Xu 2023, HaX-CoNN-style, contention-aware) × workload mixes.
+- **E2** scheduling comparison: 6 policies (FIFO, HEFT, Qilin, Xu 2023, HaX-CoNN-style, contention-aware) × workload mixes, with the optimal schedule and lower bounds as reference.
 - **E5** design-space sweep: best policy across array sizes (16², 32², 64²) and bandwidth levels.
 - **Tier 1 exit:** E1, E2, E5 figures produced; first paper draft outline.
 
 ---
 
-## Phase 2 — Tier 2: Shared LLC and partitioning
+## Phase 2 — Tier 2: New contention-aware algorithm (`sim/policies/contention_dp.py`)
 
-### 2.1 Miss-rate curves
-- Per-kernel miss-rate-vs-capacity curve (from working-set size / reuse model; e.g., analytical for GEMM tiling, simple power-law for CPU kernels).
-- **Validate:** curves monotone non-increasing; miss rate ≈ 0 when capacity ≥ working set.
+Built one piece at a time; each piece is measured on its own (E4 ablation).
 
-### 2.2 Shared LLC model (`sim/memory.py`)
-- Capacity-based (no address-level simulation): total ways, way size; unpartitioned sharing approximated by occupancy proportional to access rate.
-- The LLC represents the SoC-level cache shared by the CPU and the accelerator (not the CPU cluster's private L2); justify sizes and bandwidth with the mobile SoC characterization paper.
-- Way-partitioning: CPU vs. accelerator way allocation.
-- **Validate:** full allocation to one side reproduces its standalone miss rate.
+### 2.1 Motivation: where ESHCS falls short on this system
+| ESHCS step | Weakness | Fix in the new algorithm |
+|---|---|---|
+| Allocation by speedup `w_sw / w_hw` | Standalone times; the paper assumes no contention, so a memory-bound kernel looks faster on the accelerator than it is | Contention-adjusted costs (2.2) |
+| Groups by DAG level, all-or-nothing, then MILP + greedy fill | Coarse; the LUT (space) budget does not fit a one-kernel-at-a-time accelerator | DP allocation (2.3) |
+| Static allocation | Cannot react when actual times differ from predictions | Online greedy dispatch with correction (2.4), optional re-plan (2.6) |
+| SU/SPR priority | Becomes 0 without deadlines | Critical-path priority + contention penalty (2.5) |
 
-### 2.3 LLC → DRAM coupling
-- DRAM demand = access rate × miss rate; feeds the bandwidth model from 1.6 and the rate updates in 1.4.
-- **Validate:** shrinking the LLC raises DRAM traffic and lengthens memory-bound kernels as expected.
+### 2.2 Contention-adjusted cost model
+- Time of a kernel on each resource given its co-runners, from `allocate()` (as in `contention_aware.py`) or a PCCS-style slowdown.
+- Also the slowdown a kernel **causes** the kernels already running (the current contention-aware policy only counts the slowdown it suffers).
+- **Validate:** predictions match the simulator on hand-traced 2- and 3-kernel cases.
 
-### 2.4 Partitioning policies (`sim/partition/`)
-- Static splits (e.g., 25/50/75% to accelerator).
-- Dynamic utility-based (UCP-style) repartitioning at fixed intervals.
-- Contention tracking instead of partitioning (demotion counters, JSA 2025): implement as an option, or at least discuss, since it argues strict partitioning loses throughput.
-- **Validate:** UCP converges to the better static split on a stable workload.
+### 2.3 DP allocation (offline: which kernels go on the accelerator)
+- **Chains:** exact DP. State = (layer i, resource of layer i−1); cost = contention-adjusted time + CPU↔accelerator transfer cost.
+- **DAGs / independent kernels:** knapsack-style DP over discretized accelerator time, minimizing `max(CPU load / n_cores, accelerator load)`; replaces ESHCS's MILP + greedy fill.
+- **Validate:** DP matches brute force on small instances.
 
-### 2.5 Bandwidth throttling (optional, MoCA-style)
-- Per-agent bandwidth caps set by a simple runtime rule, as a third memory-side approach next to partitioning and tracking.
-- First thing to drop if time runs short.
-- **Validate:** caps respected in the bandwidth log; capped agent slows as predicted.
+### 2.4 Greedy online dispatch
+- Contention-aware earliest finish time, restricted to the DP allocation unless the estimate shows a gain above a threshold for switching resources.
+- **Validate:** with an unlimited threshold, behaves exactly like the DP allocation.
 
-### 2.6 Experiments
-- **E3** memory-side only (FIFO + each partition scheme, tracking, and throttling if implemented).
-- **E4** scheduling × memory-side grid: additive, overlapping, or conflicting?
-- Extend E5 with LLC size.
+### 2.5 Heuristics
+- Priority: upward rank (critical path, as in HEFT), since there are no deadlines.
+- "Cost I cause others": penalty for the slowdown a placement causes running kernels.
+- Pairing: prefer co-running a compute-bound kernel with a memory-bound one over two memory-bound kernels.
+- **Validate:** each heuristic changes the decision on a hand-built 3–5 kernel case where it should.
+
+### 2.6 Re-plan (optional)
+- When the EWMA correction drifts beyond a threshold, re-run the DP on the remaining kernels.
+
+### 2.7 Experiments
+- **E3** schedule quality: new algorithm vs. the 6 baselines and the optimal schedule, across chain and DAG families × low / medium / high contention.
+- **E4** ablation: add 2.3, 2.4, 2.5 (each heuristic) and 2.6 one at a time.
+- Extend **E5**: does the advantage hold across array sizes (16², 32², 64²), scratchpad sizes and DRAM bandwidths?
 - **Tier 2 exit:** E3/E4 figures; paper draft with full evaluation section.
 
 ---
 
-## Phase 3 — Tier 3: Energy and hardware dispatch unit
+## Phase 3 — Tier 3: Hardware cost and energy
 
-### 3.1 Energy model (`sim/energy.py`)
-- Per-op energies (MAC, SRAM/LLC access, DRAM access per byte) and active/idle power for cores and accelerator; cite sources (e.g., Horowitz ISSCC 2014, Eyeriss/Accelergy tables).
+### 3.1 Analytical hardware cost (`sim/hw_cost.py`)
+- For every scheduler: operations per decision (as a function of queue size, number of resources, DAG size), state kept (tables, counters, bits), estimated decision latency under simple per-operation assumptions.
+- Dispatch-unit feasibility: could it be built from HTS-style queue/select logic, HW HEFT_RT finish-time tracking, MoCA-style bandwidth counters, and Springer 2026 dependency tracking? Which parts stay offline (the DP) and which run per decision.
+- Report in HW HEFT_RT's form (decision latency, resource cost), with its 9.144 ns as the reference; LLC contention-tracking counters (~0.66% area) as an extra reference point.
+
+### 3.2 Dispatch-latency sensitivity
+- Charge 1, 4, 16, 64 cycles per decision in the simulator; find where scheduling overhead cancels the schedule-quality gains.
+
+### 3.3 Energy model (`sim/energy.py`, optional, first to drop)
+- Per-op energies (MAC, SRAM access, DRAM access per byte) and active/idle power for cores and accelerator; cite sources (e.g., Horowitz ISSCC 2014, Eyeriss/Accelergy tables).
 - **Validate:** energy breakdown for a single kernel matches hand calculation.
 
-### 3.2 Dispatch unit microarchitecture spec
-- Built from published hardware schedulers rather than from scratch: HEFT-style finish-time tracking from HW HEFT_RT (Fusco et al.), queue and ready/select logic from HTS, per-agent bandwidth counters from MoCA, dependency tracking from the Springer 2026 scheduler (only if 1.9 adds dependencies).
-- Inputs: bandwidth counters (per-agent bytes/window), resource busy flags, kernel descriptors. Start with DRAM bandwidth counters only; LLC contention counters are optional.
-- Structures: N-entry kernel queue, M-entry history table (kernel class → observed slowdown), finish-time estimator, selection logic.
-- Fixed-point formats and bit widths; decision latency in cycles.
-- Block diagram for the paper.
-
-### 3.3 Fixed-point golden model (`sim/policies/dispatch_unit_model.py`)
-- Bit-accurate Python model of 3.2 (integer arithmetic only, bounded tables, eviction policy).
-- Plugs into the simulator as a policy; dispatch latency charged per decision.
-- Exports decision traces (inputs → outputs) for RTL co-simulation.
-- **Validate:** results within a few % of the software `contention_aware` policy; document the gap from quantization/bounded tables.
-
-### 3.4 Analytical hardware cost
-- Storage bits, comparators/adders, estimated area (pre-RTL).
-- Report in the same form as HW HEFT_RT (decision latency, resource cost) so the two can be compared directly; LLC contention-tracking counters (~0.66% area) as a reference point.
-
-### 3.5 Experiments
-- **E6** energy across policies × partitioning; do makespan and energy rankings agree?
-- Dispatch-latency sensitivity (1, 4, 16, 64 cycles) and table-size sensitivity, with HW HEFT_RT's 9.144 ns as the reference value.
-- **Tier 3 exit:** energy figures + hardware cost table in draft.
+### 3.4 Experiments
+- **E6** overhead and hardware cost: scheduler running time (as ESHCS reports it) and the hardware cost table for every algorithm.
+- **E7** energy across policies (optional): do makespan and energy rankings agree?
+- **Tier 3 exit:** hardware cost table and overhead figures in draft.
 
 ---
 
-## Phase 4 — Tier 4 (stretch): SystemVerilog dispatch unit
+## Phase 4 — Future work (out of scope this semester)
 
-### 4.1 RTL modules (`rtl/`)
-- `kernel_queue.sv`, `history_table.sv`, `bw_monitor.sv`, `dispatch_unit.sv` (top: estimator + select FSM).
-- Synthesizable SV only; parameterized by queue depth, table size, bit widths.
-- Design references: HTS for the queue and select logic, MoCA for `bw_monitor.sv` (counter width, window, reset), Springer 2026 for dependency tracking if needed.
-- This tier produces the direct hardware comparison against HW HEFT_RT, so protect time for it.
+Kept for the paper's Future work section and for continuing the project.
 
-### 4.2 Unit testbenches
-- Per-module directed tests (queue full/empty, table hit/miss/evict, counter windows).
+### 4.1 Shared LLC and partitioning (old Tier 2)
+- Per-kernel miss-rate curves; capacity-based shared LLC (SoC-level cache, ways); LLC → DRAM coupling (DRAM demand = access rate × miss rate).
+- Static and utility-based (UCP) way-partitioning; contention tracking instead of partitioning (JSA 2025); MoCA-style bandwidth throttling.
+- Experiments: memory-side only, and scheduling × memory-side (additive, overlapping, or conflicting?).
+- Smallest version, only if everything else is done: a static LLC split (25/50/75% to the accelerator) as one more knob in E5.
 
-### 4.3 Co-simulation against golden model
-- Verilator testbench replays decision traces from 3.3; outputs must match **bit-exactly**.
-- **Validate:** 0 mismatches over traces from every workload mix.
-
-### 4.4 Synthesis
-- Yosys synthesis (generic cells, plus Nangate45/ASAP7 liberty if available); OpenSTA timing.
-- Report cell count/area, critical path, achievable frequency; sweep queue/table sizes.
-- Compare against HW HEFT_RT (9.144 ns average decision latency): comparable latency, plus contention awareness, for how much extra area.
-
-### 4.5 Close the loop
-- Feed measured decision latency (cycles at target clock) back into the simulator; re-run E2/E4 with it.
-- **Tier 4 exit:** area/timing table; final evaluation uses RTL-derived latency.
+### 4.2 SystemVerilog dispatch unit (old Tier 4)
+- Fixed-point golden model of the chosen algorithm's online part; RTL modules (`kernel_queue.sv`, `history_table.sv`, `bw_monitor.sv`, `dispatch_unit.sv`).
+- Verilator co-simulation against the golden model (bit-exact), Yosys synthesis, area/timing vs. HW HEFT_RT; measured latency fed back into the simulator.
 
 ---
 
@@ -284,10 +282,9 @@ Reading order for you: Xu 2023, PCCS, HaX-CoNN (needed before 1.8 baselines and 
 |---|---|
 | After Phase 0 | Introduction, motivation, related work |
 | After Tier 1 | Methodology (simulator, systolic model, measurements), E1/E2/E5 |
-| After Tier 2 | LLC model, E3/E4 |
-| After Tier 3 | Dispatch unit design, energy, E6 |
-| After Tier 4 | RTL implementation, area/timing vs. HW HEFT_RT |
-| End | Conclusions, limitations, AI-use disclosure, presentation slides |
+| After Tier 2 | New algorithm design, E3/E4 |
+| After Tier 3 | Hardware cost, overhead, energy, E6/E7 |
+| End | Conclusions, limitations, future work (LLC partitioning, RTL), AI-use disclosure, presentation slides |
 
 
 ## Working rules
