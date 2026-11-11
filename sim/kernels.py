@@ -18,22 +18,29 @@ class Kernel:
     kernel_id: int
     kernel_type: str
     queue: float
-    fpop: int   #floating point operations, the more fpop the more time it takes to run
-    moved_bytes: int    #min mem traffic (read + write once), minimum traffic, 
+    fpop: int #floating point operations, the more fpop the more time it takes to run
+    moved_bytes: int #min mem traffic (read + write once), minimum traffic, 
     work_set: int
     dim: tuple = None
-    dtype_bytes: int = 2    #bf16 of real accel like google tpu or apple or nvidia tensors
-    parallelize: bool = True    #can split the work to mult cores (cpu)
+    dtype_bytes: int = 2 #bf16 of real accel like google tpu or apple or nvidia tensors
+    parallelize: bool = True #can split the work to mult cores (cpu)
     resource: str = None #cpu or accelerator
     start: float = None
     finish: float = None
-    remaining: float = 1.0  #indicate the fraction of work left to do, where 1 = 100% left and 0 is done
+    remaining: float = 1.0 #indicate the fraction of work left to do, where 1 = 100% left and 0 is done
+    deps: tuple = () #kernel_ids that have to finish before this one can start, () = independent
+    resource: str = None #cpu or accelerator
+    ready: float = None #time it was released to the policy (arrived and all deps finished)
+    start: float = None
 
     def __post_init__(self):
         if self.fpop < 0 or self.moved_bytes <= 0:
             raise ValueError(f"Inval kernel {self.kernel_id} with fpop: {self.fpop} must be positive and moved_bytes: {self.moved_bytes} must be greater than 0")
         if self.queue < 0:
             raise ValueError(f"Inval kernel {self.kernel_id} because queue time {self.queue} must be >= 0")
+        self.deps = tuple(dict.fromkeys(self.deps))
+        if self.kernel_id in self.deps:
+            raise ValueError(f"Inval kernel {self.kernel_id} because it depends on itself")
 
     @property
     def fpops_per_byte(self):
@@ -62,9 +69,15 @@ class Kernel:
             return None
         return self.start - self.queue   #computing the time from when k was queued to when it started running
 
+    @property
+    def ready_wait(self):
+        if self.start is None or self.ready is None:
+            return None
+        return self.start - self.ready #computing the time from when k was ready to when it started running
+
 
 #general mat mul (gmm): (m x k) @ (k x n) = (m x n)
-def make_gmm_kernel(kernel_id, m, k, n, arrival, dtype_bytes=2):
+def make_gmm_kernel(kernel_id, m, k, n, arrival, dtype_bytes=2, deps=()):
     if min(m, k, n) <= 0:
         raise ValueError(f"Dimensions of the general MatMul kernel: {(m, k, n)} must be positive, id: {kernel_id}")
     fpop = 2 * m * k * n
@@ -73,14 +86,19 @@ def make_gmm_kernel(kernel_id, m, k, n, arrival, dtype_bytes=2):
     c_bytes = m * n *dtype_bytes #out
 
     tot = a_bytes + b_bytes + c_bytes
-    return Kernel(kernel_id=kernel_id, kernel_type=general_mat_mul_kernel, queue=arrival,fpop=fpop, moved_bytes=tot, work_set=tot, dim=(m, k, n), dtype_bytes=dtype_bytes)
+    return Kernel(kernel_id=kernel_id, kernel_type=general_mat_mul_kernel, queue=arrival,fpop=fpop, moved_bytes=tot, work_set=tot, dim=(m, k, n), dtype_bytes=dtype_bytes, deps=deps)
 
 
 #simple kernels, read n inputs arryas, write 1 output arry
-def make_simple_kernel(kernel_id, n_element, arrival, ops_per_element=1, n_in=1, dtype_bytes=2):
+def make_simple_kernel(kernel_id, n_element, arrival, ops_per_element=1, n_in=1, dtype_bytes=2, deps=()):
     if n_element <= 0:
         raise ValueError(f"The number of elements: {n_element} must be positive, id: {kernel_id}.")
     fpop = n_element * ops_per_element
     total = n_element * dtype_bytes * (n_in + 1)
-    return Kernel(kernel_id=kernel_id, kernel_type=simple, queue=arrival, fpop=fpop, moved_bytes=total, work_set=total, dtype_bytes=dtype_bytes)
+    return Kernel(kernel_id=kernel_id, kernel_type=simple, queue=arrival, fpop=fpop, moved_bytes=total, work_set=total, dtype_bytes=dtype_bytes, deps=deps)
 
+def chain(kernels):
+    for prev, kernel in zip(kernels, kernels[1:]):
+        if prev.kernel_id not in kernel.deps:
+            kernel.deps = kernel.deps + (prev.kernel_id,)
+    return kernels

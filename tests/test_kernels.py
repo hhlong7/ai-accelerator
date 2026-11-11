@@ -1,6 +1,6 @@
 import pytest
 
-from sim.kernels import make_gmm_kernel, make_simple_kernel, general_mat_mul_kernel, simple, cpu, accelerator
+from sim.kernels import make_gmm_kernel, make_simple_kernel, general_mat_mul_kernel, simple, cpu, accelerator, chain
 
 
 #gemm 64x128x32 fp16 by hand:
@@ -74,3 +74,34 @@ def test_invalid_kernels_raise():
         make_gmm_kernel(0, 64, 64, 64, arrival=-1.00)
     with pytest.raises(ValueError):
         make_simple_kernel(0, 0, arrival=0.00)
+
+#no deps given => independent, like before
+def test_kernels_are_independent_by_default():
+    k = make_simple_kernel(0, 100, arrival=0.00)
+    assert k.deps == ()
+    assert k.ready is None and k.ready_wait is None
+
+
+#deps become a tuple, duplicates removed
+def test_deps_given():
+    k = make_gmm_kernel(2, 10, 32, 32, arrival=0.00, deps=[0, 1, 0])
+    assert k.deps == (0, 1)
+
+
+def test_kernel_cant_depend_on_itself():
+    with pytest.raises(ValueError):
+        make_simple_kernel(0, 100, arrival=0.00, deps=[0])
+
+
+#chain: each kernel depends on the one before, the 1st stays independent
+def test_chain():
+    ks = chain([make_simple_kernel(i, 100, arrival=0.00) for i in range(3)])
+    assert [k.deps for k in ks] == [(), (0,), (1,)]
+
+
+#wait = start - queue (includes waiting for deps), ready_wait = start - ready (only waiting for a resource)
+def test_ready_wait():
+    k = make_simple_kernel(0, 100, arrival=5.00)
+    k.ready, k.start = 20.00, 30.00
+    assert k.wait == 25.00
+    assert k.ready_wait == 10.00
