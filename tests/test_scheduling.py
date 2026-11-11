@@ -1,7 +1,7 @@
 import pytest
 
 from sim.config import CoreConfig, AcceleratorConfig, MemoryConfig, SystemConfig
-from sim.kernels import make_gmm_kernel, make_simple_kernel, cpu, accelerator, general_mat_mul_kernel, simple
+from sim.kernels import make_gmm_kernel, make_simple_kernel, cpu, accelerator, general_mat_mul_kernel, simple, chain
 from sim.simulator import Simulator
 from sim.policies.fifo import Fifo
 from sim.policies.heft_greedy import HeftGreedy
@@ -41,6 +41,11 @@ def gemm_heavy():
 #workload 2: 2 memory bound kernels, 2 small gemms, 1 more memory bound kernel, all at t = 0
 def mixed():
     return [mem_bound(0), mem_bound(1), small_gemm(2), small_gemm(3), mem_bound(4)]
+
+#workload 3: dependent and independent kernels mixed
+#chain k0 => k1 => k2, chain k3 => k4, and k5 independent
+def chained():
+    return chain([mem_bound(0), small_gemm(1), big_gemm(2)]) + chain([big_gemm(3), mem_bound(4)]) + [small_gemm(5)]
 
 
 def run(policy, kernels):
@@ -202,10 +207,11 @@ def test_contention_aware_ignores_kernels_finishing_now():
     assert k4_on_cpu and all(raw == pytest.approx(800.0) for raw in k4_on_cpu)
 
 
-#every policy has to start and finish every kernel on both workloads
 @pytest.mark.parametrize("make_policy", [Fifo, HeftGreedy, QilinStyle, ContentionAware])
-@pytest.mark.parametrize("make_workload", [gemm_heavy, mixed])
+@pytest.mark.parametrize("make_workload", [gemm_heavy, mixed, chained])
 def test_every_policy_finishes_everything(make_policy, make_workload):
     kernels = run(make_policy(), make_workload())
+    by_id = {k.kernel_id: k for k in kernels}
     assert all(k.done for k in kernels)
     assert all(k.start >= k.queue and k.finish > k.start for k in kernels)
+    assert all(k.start >= by_id[dep].finish for k in kernels for dep in k.deps)  #deps respected

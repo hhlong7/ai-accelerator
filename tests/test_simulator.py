@@ -174,3 +174,74 @@ def test_same_time_arrivals_picked_together():
                 mem_bound(3, 50.00)])   #k3 comes later => not part of the 1st pick
     sim.run()
     assert policy.first_pick == [0, 1, 2]
+
+#--- dependencies ---
+#mem_bound kernel alone = 400 ns, 2 of them together = 800 ns each (see above)
+
+#k1 needs k0: it waits even though the 2nd core is free
+#k0: 0 => 400, k1: released at 400, alone => 800
+def test_chain_runs_in_order():
+    k0, k1 = mem_bound(0, 0.00), mem_bound(1, 0.00)
+    k1.deps = (0,)
+    sim, end = run([k0, k1], {0: cpu, 1: cpu})
+    assert k1.ready == pytest.approx(400.0)
+    assert k1.start == pytest.approx(400.0) and k1.finish == pytest.approx(800.0)
+    assert k1.wait == pytest.approx(400.0)      #from arrival: includes waiting for k0
+    assert k1.ready_wait == pytest.approx(0.0)  #from release: a core was free right away
+    assert end == pytest.approx(800.0)
+
+
+#independent and dependent kernels mixed: k0 => k1 is a chain, k2 is independent
+#k0 and k2 share bandwidth => 800 each. k1 released at 800, alone => 1200
+def test_independent_kernel_runs_alongside_chain():
+    k0, k1, k2 = mem_bound(0, 0.00), mem_bound(1, 0.00), mem_bound(2, 0.00)
+    k1.deps = (0,)
+    sim, end = run([k0, k1, k2], {0: cpu, 1: cpu, 2: cpu})
+    assert k0.finish == pytest.approx(800.0) and k2.finish == pytest.approx(800.0)
+    assert k1.start == pytest.approx(800.0) and k1.finish == pytest.approx(1200.0)
+
+
+#fork join: k0 => (k1, k2) => k3
+#k0: 0 => 400. k1, k2 together: 400 => 1200. k3 needs both: released at 1200, alone => 1600
+def test_fork_join():
+    k0, k1, k2, k3 = [mem_bound(i, 0.00) for i in range(4)]
+    k1.deps, k2.deps, k3.deps = (0,), (0,), (1, 2)
+    sim, end = run([k0, k1, k2, k3], {i: cpu for i in range(4)})
+    assert k1.start == pytest.approx(400.0) and k2.start == pytest.approx(400.0)
+    assert k1.finish == pytest.approx(1200.0) and k2.finish == pytest.approx(1200.0)
+    assert k3.ready == pytest.approx(1200.0) and k3.finish == pytest.approx(1600.0)
+
+
+#the dep finished before the kernel arrives => released at its own arrival time
+def test_dep_done_before_arrival():
+    k0, k1 = mem_bound(0, 0.00), mem_bound(1, 1000.00)
+    k1.deps = (0,)
+    sim, end = run([k0, k1], {0: cpu, 1: cpu})
+    assert k1.ready == pytest.approx(1000.0) and k1.start == pytest.approx(1000.0)
+
+
+#a kernel can depend on one submitted in an earlier submit() call
+def test_deps_across_submits():
+    sim = Simulator(make_system(), Fixed({0: cpu, 1: cpu}))
+    sim.submit([mem_bound(0, 0.00)])
+    k1 = mem_bound(1, 0.00)
+    k1.deps = (0,)
+    sim.submit([k1])
+    sim.run()
+    assert k1.start == pytest.approx(400.0)
+
+
+def test_bad_deps_raise():
+    sim = Simulator(make_system(), Fixed({}))
+    with pytest.raises(ValueError):
+        sim.submit([make_simple_kernel(0, 1000, arrival=0.00, deps=[7])])   #unknown dep
+
+    sim = Simulator(make_system(), Fixed({}))
+    k0, k1 = mem_bound(0, 0.00), mem_bound(1, 0.00)
+    k0.deps, k1.deps = (1,), (0,)
+    with pytest.raises(ValueError):
+        sim.submit([k0, k1])    #cycle: k0 needs k1, k1 needs k0
+
+    sim = Simulator(make_system(), Fixed({}))
+    with pytest.raises(ValueError):
+        sim.submit([mem_bound(0, 0.00), mem_bound(0, 0.00)])    #same id twice

@@ -40,15 +40,46 @@ class Simulator:
         self.bw_log = [] #(time, total bytes per sec used) every time tge shares change
         self.engine.register(queued, self.on_queued)
         self.engine.register(segment_done, self.on_segment_done)
+        self.by_id = {} #kernel id -> kernel
+        self.children = {} #kernel id to the kernel ids that depend on it
+        self.deps_left = {} #kernel id to the set of deps that havent finished yet
+        self.arrived = set() #kernel that arrive time has passed
 
     @property
     def now(self):
         return self.engine.current_time
 
     def submit(self, kernels):
+        ids = [k.kernel_id for k in kernels]
+        if len(set(ids)) != len(ids) or any(kid in self.by_id for kid in ids):
+            raise ValueError(f"Duplicate kernel ids in: {ids}")
+        self.by_id.update({k.kernel_id: k for k in kernels})
+
+        for kernel in kernels:
+            for dep in kernel.deps:
+                if dep not in self.by_id:
+                    raise ValueError(f"Kernel: {kernel.kernel_id} depends on unknown kernel: {dep}")
+                self.children.setdefault(dep, []).append(kernel.kernel_id)
+            self.deps_left[kernel.kernel_id] = {dep for dep in kernel.deps if not self.by_id[dep].done}
+        self.check_no_cycles()
+
         for kernel in kernels:
             self.kernels.append(kernel)
             self.engine.schedule(kernel.queue, queued, kernel)
+
+    def check_no_cycles(self): #check for cycles in the kernel dep graph
+        indegree = {kid: len(k.deps) for kid, k in self.by_id.items()}
+        free = [kid for kid, n in indegree.items() if n == 0]
+        seen = 0
+        while free:
+            kid = free.pop()
+            seen += 1
+            for child in self.children.get(kid, []):
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    free.append(child)
+        if seen != len(self.by_id):
+            raise ValueError("The kernel dependencies have a cycle")
 
     #run till everything is done, returns the end time (makespan)
     def run(self, stop=None):
@@ -64,9 +95,15 @@ class Simulator:
         q = self.engine.event_queue
         return bool(q) and q[0][0] == self.now and q[0][2] == queued
 
+    def release(self, kernel):
+        kernel.ready = self.now
+        self.policy.on_queued(kernel, self)
+
     def on_queued(self, eng, kernel):
         self.advance_jobs()
-        self.policy.on_queued(kernel, self)
+        self.arrived.add(kernel.kernel_id)
+        if not self.deps_left[kernel.kernel_id]:
+            self.release(kernel) #otherwise it gets released when its last dep finishes
         if not self.more_arrivals_now():
             self.start_picked()
         self.reallocate()
@@ -104,6 +141,10 @@ class Simulator:
         else:
             self.accelerator.release(kernel, self.now)
         del self.jobs[kernel.kernel_id]
+        for child_id in self.children.get(kernel.kernel_id, []):
+            self.deps_left[child_id].discard(kernel.kernel_id)
+            if not self.deps_left[child_id] and child_id in self.arrived:
+                self.release(self.by_id[child_id])
 
 
     #step 1: progress everyone up to now with their old rates
