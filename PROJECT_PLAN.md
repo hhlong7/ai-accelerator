@@ -2,6 +2,9 @@
 
 **CPE 5300 Course Project — Implementation Plan (Tiers 1–3)**
 
+
+# CLEEEEEEEE CLELELELELLEEE
+
 ## Research question
 
 In a shared-memory SoC where CPU cores and a systolic-array accelerator compete for DRAM bandwidth, can a scheduler that models this contention produce better schedules than existing heterogeneous schedulers that ignore it, and what would it cost to run as an **on-chip dispatch unit**? We compare FIFO, HEFT, Qilin and Xu 2023 (ESHCS) against a **new contention-aware algorithm** (dynamic-programming allocation + greedy dispatch + contention heuristics), measure how close each one gets to the optimal schedule, and estimate each algorithm's hardware cost. The answer is studied across accelerator sizes and memory bandwidths.
