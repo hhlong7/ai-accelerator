@@ -7,7 +7,7 @@ one that is the fastest to compute and run the code for it.
 
 """
 so this means that:
-- the event would be in time order
+- the event would be in time order, not event queue order
 - the ones with the same time would be in order of when they were added to the queue
 - they can be cancelled if not need anymore
 """
