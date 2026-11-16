@@ -95,3 +95,88 @@ def allocate_hw(groups, w_sw, w_hw, budget):
             left -= w_hw[i]
     return hw
 
+
+
+"""
+
+Part B: priorities for the cpu kernels (eqs 5 to 11 in the paper). 
+'et' is the execution time of each kernel on 
+the resource the allocation gave it
+(w_sw or w_hw).
+
+no deadlines for our workloads: 
+with no deadline, LFT = infinity, 
+urgency = 0 for every kernel and
+every priority is 0. so every exit kernel 
+gets the same deadline = the critical path 
+length (the makespan with unlimited cores).
+a kernel on the critical path then has urgency
+1 from the start. no communication cost either
+(c_ij = 0), the cores and the accelerator 
+share memory.
+
+"""
+
+
+# successors of every kernel
+def successors(kernels):
+    succ = {k.kernel_id: [] for k in kernels}
+    for k in kernels:
+        for d in k.deps:
+            succ[d].append(k.kernel_id)
+    return succ
+
+# eq 7: earliest start time, after release time and every dep finished
+def earliest_start(kernels, et):
+    est = {}
+    for k in kernels: # deps come first
+        est[k.kernel_id] = max([k.queue] + [est[d] + et[d] 
+                                            for d in k.deps] )
+    return est
+
+# the deadline we give every kernel
+def critical_path(est, et):
+    return max(est[i] + et[i] for i in est)
+
+# eq 8: latest finish time
+def latest_finish(kernels, et, succ, deadline):
+    lft = {}
+    for k in reversed(kernels):
+        kid = k.kernel_id
+        lft[kid] = min([deadline] + [lft[j] - et[j]
+                                     for j in succ[kid]])
+
+    return lft
+
+# eq 5: successor parallel rank
+# more succ = more work released when fin
+def successor_rank(succ):
+    most = max(len(s) for s in succ.values())
+
+    return {kid: (len(s) / most if most else 0.0)
+            for kid, s in succ.items()}
+
+
+
+# eq 9: scheduling urgency
+# 1 = must start now or successor misses deadline
+# It is clamped to 1
+def urgency(et_i, est_i, lft_i, now):
+    window = lft_i - max(est_i, now)
+    if window <= et_i:
+        return 1.0
+    return et_i / window
+
+# eq 11: priority = own urgency + successor rank
+def priorities(kernels, et, est, lft, spr, succ, now):
+    prio = {}
+    for k in reversed(kernels): # successors come first
+        kid = k.kernel_id
+        su = urgency(et[kid], est[kid], lft[kid], now)
+        best_next = max((prio[j] for j in succ[kid]),
+                        default = None)
+        prio[kid] = su if best_next is None else su + spr[kid] * best_next
+
+    return prio
+
+
