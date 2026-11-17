@@ -4,7 +4,7 @@ moved by the scheduler. kernel = (type, dim, fpop, bytes)
 run in nanosecs
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 #kernel type
 general_mat_mul_kernel = "gemm"     #can run on accelerator or cpu
@@ -102,3 +102,37 @@ def chain(kernels):
         if prev.kernel_id not in kernel.deps:
             kernel.deps = kernel.deps + (prev.kernel_id,)
     return kernels
+
+
+'''
+For optimal part b
+
+'''
+
+
+# copies of the kernels with the runtime fields
+# cleared, so same workload can run again
+# the sim writes resource, start, finish into kernels
+def fresh(kernels):
+    return [replace(k, resource = None, start = None,
+                    finish = None, remaining = 1.0, ready = None)
+                    for k in kernels]
+
+
+# the kernels reordered so every kernel comes
+# after all it's deps
+# in inward tree lists the roots first
+def topological(kernels):
+    by_id = {k.kernel_id: k for k in kernels}
+    left = {k.kernel_id: set(k.deps) for k in kernels}
+    order = []
+    while left:
+        ready = [kid for kid, deps in left.items() if not deps]
+        if not ready:
+            raise ValueError("The kernel dependencies have a cycle")
+        for kid in ready:
+            order.append(by_id[kid])
+            del left[kid]
+        for deps in left.values():
+            deps.difference_update(ready)
+    return order
