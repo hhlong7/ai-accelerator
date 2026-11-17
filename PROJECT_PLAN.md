@@ -2,12 +2,9 @@
 
 **CPE 5300 Course Project — Implementation Plan (Tiers 1–3)**
 
-
-# CLEEEEEEEE CLELELELELLEEE
-
 ## Research question
 
-In a shared-memory SoC where CPU cores and a systolic-array accelerator compete for DRAM bandwidth, can a scheduler that models this contention produce better schedules than existing heterogeneous schedulers that ignore it, and what would it cost to run as an **on-chip dispatch unit**? We compare FIFO, HEFT, Qilin and Xu 2023 (ESHCS) against a **new contention-aware algorithm** (dynamic-programming allocation + greedy dispatch + contention heuristics), measure how close each one gets to the optimal schedule, and estimate each algorithm's hardware cost. The answer is studied across accelerator sizes and memory bandwidths.
+In a shared-memory SoC where CPU cores and a systolic-array accelerator compete for DRAM bandwidth, can a scheduler that models this contention produce better schedules than existing heterogeneous schedulers that ignore it, and what would it cost to run as an **on-chip dispatch unit**? We compare FIFO, HEFT, Qilin and Xu 2023 (ESHCS) against a **new contention-aware algorithm** (contention-aware ILP allocation + greedy dispatch + contention heuristics, on the same two-phase skeleton as ESHCS so every gain is attributable to modeling contention), measure how close each one gets to the optimal schedule, and estimate each algorithm's hardware cost. The answer is studied across accelerator sizes and memory bandwidths.
 
 Project type (syllabus): *compare existing ideas that have not been directly compared* + *initial study of a new idea* (the contention-aware algorithm).
 
@@ -26,7 +23,7 @@ With about 5 weeks left, the scope is cut to the simulator, the new algorithm, a
 | Tier | Scope | Experiments enabled |
 |---|---|---|
 | **1 — Core** | Event engine, cores, phase-based systolic accelerator, DRAM bandwidth contention (grounded in C measurements), task dependencies, Xu 2023 DAG workloads, baseline policies (FIFO, HEFT, Qilin, Xu 2023) + contention-aware policy, optimal schedule and lower bounds, metrics, sweeps | E1 characterization, E2 scheduling comparison, E5 design-space sweep |
-| **2 — New algorithm** | DP allocation + greedy dispatch + contention heuristics ("cost I cause others", compute/memory pairing), built and measured one piece at a time | E3 quality vs. baselines and optimal, E4 ablation, E5 extended |
+| **2 — New algorithm** | Cost model (time + harm) + whole-DAG ILP allocation (dependencies, load, DRAM traffic) + greedy dispatch + contention heuristics behind a bandwidth trigger ("cost I cause others", compute/memory pairing), built and measured one piece at a time | E3 quality vs. baselines and optimal, E4 ablation, E5 extended |
 | **3 — Hardware cost + energy** | Analytical hardware cost of every scheduler (operations per decision, state, decision latency, dispatch-unit feasibility) vs. HW HEFT_RT; dispatch-latency sensitivity; energy model (optional) | E6 overhead and hardware cost, E7 energy (optional) |
 
 Each tier ends with a complete, writable paper. Never start a tier until the previous tier's validation passes.
@@ -35,10 +32,10 @@ Each tier ends with a complete, writable paper. Never start a tier until the pre
 
 | Week | Work |
 |---|---|
-| 1 (Nov 9) | Dependencies in the simulator; 1.9 DAG workloads; 1.10 metrics; start `xu2023.py` |
-| 2 (Nov 16) | `xu2023.py`, `optimal.py` + lower bounds; 1.11 harness; first E1/E2 runs; 1.7 measurements in parallel |
-| 3 (Nov 23, short week) | Tier 2: cost model, DP allocation, greedy dispatch; first E3 results |
-| 4 (Nov 30) | Tier 2 heuristics, E4 ablation, E5 sweep; Tier 3 hardware cost table |
+| 1 (Nov 9) | Dependencies in the simulator; 1.9 DAG workloads; 1.10 metrics; start `eshcs.py` |
+| 2 (Nov 16) | `eshcs.py`, `optimal.py` + lower bounds; 1.11 harness; first E1/E2 runs; 1.7 measurements in parallel |
+| 3 (Nov 23, short week) | Tier 2: cost model, greedy dispatch with a placeholder plan, malleable cores, accelerator feeding; ILP allocation; first E3 results |
+| 4 (Nov 30) | Tier 2: deliberate delay, harm/pairing + trigger, E4 ablation, E5 sweep; Tier 3 hardware cost table |
 | 5 (Dec 7) | Final experiments, paper, presentation |
 
 ## Languages and tools
@@ -67,10 +64,11 @@ sim/
     fifo.py
     heft_greedy.py           # StarPU-style
     qilin_style.py
-    xu2023.py                # ESHCS, recent same-problem baseline (1.8)
+    eshcs.py                 # ESHCS (Xu 2023), recent same-problem baseline (1.8)
     contention_aware.py      # software form (Tier 1)
     optimal.py               # exact schedule + lower bounds on small DAGs (1.8)
-    contention_dp.py         # new algorithm (Tier 2)
+    cost_model.py            # what-if replay: a candidate's time and the harm it causes (2.2)
+    contention_ilp.py        # new algorithm (Tier 2)
   workload.py
   metrics.py
 bench/
@@ -107,7 +105,7 @@ paper/
 
 | Paper | Venue | Reader | Used in |
 |---|---|---|---|
-| Efficient tasks scheduling in multicore systems integrated with hardware accelerators (Xu, Shi, Chen) | J. Supercomputing 2023 | you | 1.8 `xu2023.py` baseline; DAG workloads for 1.9; 2.1 weaknesses the new algorithm targets |
+| Efficient tasks scheduling in multicore systems integrated with hardware accelerators (Xu, Shi, Chen) | J. Supercomputing 2023 | you | 1.8 `eshcs.py` baseline; DAG workloads for 1.9; 2.1 weaknesses the new algorithm targets |
 | PCCS: Processor-Centric Contention-aware Slowdown Model for Heterogeneous System-on-Chips (Xu, Belviranli, Shen, Vetter) | MICRO 2021 | you | 1.7 measurements; 2.2 PCCS-style slowdown option in the cost model; E1 comparison |
 | A Hardware-based HEFT Scheduler Implementation for Dynamic Workloads on Heterogeneous SoCs (Fusco, Hassan, Mack, Akoglu) | VLSI-SoC 2022 | you | 3.1 hardware cost metrics and comparison point (9.144 ns) |
 | HTS: A Hardware Task Scheduler for Heterogeneous Systems | arXiv 2019 | you | 3.1 dispatch-unit feasibility (queue and select logic) |
@@ -171,7 +169,7 @@ Reading order for you: Xu 2023 and PCCS (needed before 1.8 baselines and 2.2), t
 - `heft_greedy.py`: StarPU-style earliest-finish-time using standalone performance models (no contention awareness).
 - `qilin_style.py`: per-resource curve fit on execution history, adaptive split.
 - `contention_aware.py` (software form): predicted finish time *including* current bandwidth contention + history-based correction term.
-- `xu2023.py`: ESHCS, recent same-problem baseline (multicore + accelerators, minimize total execution time, no memory contention). Implemented from the paper; docstring lists every simplification.
+- `eshcs.py`: ESHCS, recent same-problem baseline (multicore + accelerators, minimize total execution time, no memory contention). Implemented from the paper; docstring lists every simplification.
 - `optimal.py`: exact schedule for small DAGs (brute force, or ILP with `scipy.optimize.milp`) plus lower bounds: total bytes / peak DRAM bandwidth, critical path with standalone times, total work / number of resources. Used to report each policy's optimality gap.
 - **Validate:** each policy's decisions on a 5-kernel hand-traced workload match expected assignments; `optimal.py` is never worse than any policy and never below the lower bounds.
 
@@ -196,43 +194,98 @@ Reading order for you: Xu 2023 and PCCS (needed before 1.8 baselines and 2.2), t
 
 ---
 
-## Phase 2 — Tier 2: New contention-aware algorithm (`sim/policies/contention_dp.py`)
+## Phase 2 — Tier 2: New contention-aware algorithm (`sim/policies/contention_ilp.py`)
 
-Built one piece at a time; each piece is measured on its own (E4 ablation).
+Same two-phase skeleton as ESHCS (offline allocation + online scheduling), so the comparison is controlled: every difference from ESHCS models contention or fixes a weakness listed in 2.1, and the E4 ablation adds them one at a time starting from ESHCS. Built one piece at a time; each piece is measured on its own.
+
+**Decision (2026-11-14):** ILP instead of DP for the allocation. DP and ILP give the same answer to the same knapsack, so switching solvers alone is not a contribution; the ILP is chosen because it can also model dependencies and DRAM traffic (2.3), which a knapsack DP cannot do easily.
 
 ### 2.1 Motivation: where ESHCS falls short on this system
 | ESHCS step | Weakness | Fix in the new algorithm |
 |---|---|---|
 | Allocation by speedup `w_sw / w_hw` | Standalone times; the paper assumes no contention, so a memory-bound kernel looks faster on the accelerator than it is | Contention-adjusted costs (2.2) |
-| Groups by DAG level, all-or-nothing, then MILP + greedy fill | Coarse; the LUT (space) budget does not fit a one-kernel-at-a-time accelerator | DP allocation (2.3) |
-| Static allocation | Cannot react when actual times differ from predictions | Online greedy dispatch with correction (2.4), optional re-plan (2.6) |
-| SU/SPR priority | Becomes 0 without deadlines | Critical-path priority + contention penalty (2.5) |
+| Groups by DAG level, all-or-nothing, then MILP + greedy fill | Coarse, ignores the critical path; the LUT (space) budget does not fit a one-kernel-at-a-time accelerator | Whole-DAG ILP with dependency, load and DRAM constraints (2.3) |
+| Static allocation | Cannot react when actual times differ from predictions | Online greedy dispatch with override (2.4), optional re-plan (2.6) |
+| SU/SPR priority | Becomes 0 without deadlines | Critical-path priority + contention heuristics (2.5) |
 
-### 2.2 Contention-adjusted cost model
-- Time of a kernel on each resource given its co-runners, from `allocate()` (as in `contention_aware.py`) or a PCCS-style slowdown.
-- Also the slowdown a kernel **causes** the kernels already running (the current contention-aware policy only counts the slowdown it suffers).
-- **Validate:** predictions match the simulator on hand-traced 2- and 3-kernel cases.
+### 2.1b How the new algorithm differs from ESHCS
+In one sentence: ESHCS treats runtimes as fixed and plans by speedup; the new algorithm treats runtimes as depending on what else is running and plans and dispatches for makespan under shared bandwidth (the slowdown a kernel suffers, the slowdown it causes, and when not to start at all).
 
-### 2.3 DP allocation (offline: which kernels go on the accelerator)
-- **DAGs:** knapsack-style DP over discretized accelerator time, minimizing `max(CPU load / n_cores, accelerator load)`; replaces ESHCS's MILP + greedy fill.
-- **Validate:** DP matches brute force on small instances.
+**Offline: which GEMMs go on the accelerator**
+
+| | ESHCS | New algorithm | Contention-specific? |
+|---|---|---|---|
+| Time estimates | Standalone | Contention-adjusted (2.2) | yes |
+| Scope | One DAG level at a time, biggest speedup first, all-or-nothing | Whole DAG at once | no |
+| Solver | Whole groups, ILP on the first group that does not fit, greedy fill | One ILP (2.3) | no |
+| Objective | Speedup within a fixed budget (`hw_share`) | Estimated makespan `T` | no |
+| Dependencies | Only through level order | Critical-path constraints on every edge | no |
+| Memory traffic | Ignored | DRAM constraint `Σ bytes / peak_bw ≤ T` | yes |
+| Budget knob | `hw_share` (tuned) | None; the load constraints decide | no |
+
+**Online: what starts now**
+
+| | ESHCS | New algorithm | Contention-specific? |
+|---|---|---|---|
+| Priority | SU/SPR (0 without deadlines) | Upward rank (critical path) | no |
+| Placement | Strictly the plan | Plan, with override when the cost model shows a gain (2.4) | partly |
+| Runtime estimate | Fixed standalone | What-if replay with the running kernels (2.2) | yes |
+| Effect on others | Not considered | Harm (2.2, 2.5) | yes |
+| Cores per CPU kernel | 1 | Malleable cores (2.5) | no |
+| Accelerator idle time | Not considered | Accelerator feeding (2.5) | no |
+| Starting work | Always, if a resource is free | Deliberate delay (2.5) | yes |
+| Decision cost | Always cheap | Cheap by default, full cost model only under the contention trigger (2.5) | yes |
+
+**Kept the same on purpose:** the two-phase skeleton (ILP offline, greedy online), GEMM-only one-at-a-time accelerator, the ESHCS DAG families, makespan as the objective.
+
+### 2.2 Contention-adjusted cost model (`sim/policies/cost_model.py`)
+- What-if replay of the running jobs with the simulator's own rate model (segments + `allocate()`): for a candidate (kernel, resource) it returns **time** (how long it takes with its co-runners) and **harm** (extra ns it causes the running kernels, the "cost I cause others" that `contention_aware.py` ignores).
+- Exact when nothing else starts in the meantime.
+- Harm is also returned per running kernel (`{kernel_id: extra_ns}`), so the delay heuristic (2.5) can weight it by criticality.
+- **Validate:** time and harm match the simulator on hand-traced 2- and 3-kernel cases (CPU + accelerator, compute- + memory-bound).
+- Cheap approximation for hardware (Tier 3): harm ≈ overlap time × the bandwidth fraction the candidate takes; compare against the replay.
+
+### 2.3 ILP allocation (offline: which GEMMs go on the accelerator)
+- Variables: `x_v ∈ {0,1}` (GEMM v on the accelerator), `f_v ≥ 0` (estimated finish), `T` (makespan estimate). `cost_v = w_sw_v (1 - x_v) + w_hw_v x_v`.
+- Minimize `T` subject to:
+  - dependencies: `f_v ≥ f_u + cost_v` for every edge `u -> v`, `f_v ≥ cost_v`, `T ≥ f_v` (critical path)
+  - accelerator load: `T ≥ Σ w_hw_v x_v` (one kernel at a time)
+  - CPU load: `T ≥ Σ w_sw_v (1 - x_v) / n_cores`
+  - DRAM traffic: `T ≥ Σ bytes_v(x_v) / peak_bw` (a GEMM moves different bytes on the accelerator than on the CPU)
+- Costs `w_sw`, `w_hw` are contention-adjusted (memory-bound CPU kernels inflated by the expected co-run slowdown from 2.2), not standalone.
+- The `f_v` constraints ignore resource conflicts, so `T` is an estimate for planning; the greedy dispatch (2.4) handles the details. With `x` relaxed to [0, 1] the same model gives a lower bound for `optimal.py`.
+- Solved with `scipy.optimize.milp`; runs once per DAG (offline). Its solve time is reported as the one-time planning cost, separately from makespan.
+- **Validate:** on small DAGs, the ILP placement replayed in the simulator is within a few % of the brute-force optimum; each constraint changes the placement on a hand-built case where it should (deep chain → critical path, many memory-bound kernels → DRAM).
 
 ### 2.4 Greedy online dispatch
-- Contention-aware earliest finish time, restricted to the DP allocation unless the estimate shows a gain above a threshold for switching resources.
-- **Validate:** with an unlimited threshold, behaves exactly like the DP allocation.
+- **Build order: online part first.** The greedy dispatch and the heuristics only *read* a placement plan, so they are built and measured before the ILP, with a placeholder plan (a GEMM goes on the accelerator if it is faster there alone). The ILP plan (2.3) is swapped in afterwards without changing the online code.
+- Ready kernels by priority (upward rank); each goes where the plan placed it, unless that resource is busy, another is free, and the cost model shows a gain above a threshold (override).
+- Each heuristic in 2.5 is a constructor flag (e.g. `ContentionILP(delay=False, malleable=False, feed=False)`), so the E4 ablation is the same policy with flags switched on one at a time.
+- **Validate:** with an infinite threshold it follows the plan exactly; with every flag off it matches the plain greedy dispatch.
 
-### 2.5 Heuristics
+### 2.5 Heuristics (behind a contention trigger)
 - Priority: upward rank (critical path, as in HEFT), since there are no deadlines.
-- "Cost I cause others": penalty for the slowdown a placement causes running kernels.
+- **Contention trigger:** the contention heuristics run only when `running demand + candidate demand > peak bandwidth`; otherwise the cheap path (plan + priority, about ESHCS's cost) decides. Keeps the average decision cost low for Tier 3.
+- "Cost I cause others": pick the candidate minimizing `time + λ · harm` from 2.2.
 - Pairing: prefer co-running a compute-bound kernel with a memory-bound one over two memory-bound kernels.
-- **Validate:** each heuristic changes the decision on a hand-built 3–5 kernel case where it should.
+
+**Chosen improvements (2026-11-14), built in this order, each on its own branch with its own tests:**
+
+1. **Malleable cores** (`malleable`, first, easiest). When more cores are free than kernels waiting for the CPU, give a splittable kernel extra idle cores. Extra cores only speed up compute, so a memory-bound kernel gains nothing: ask the cost model `what_if(k, cpu, sim, num_cores=n)` for n = 1 .. free cores and take the smallest n within a few % of the best time. Variant for the ablation: keep cores free for children of kernels about to finish.
+   - **Validate:** a lone compute-bound kernel takes 2 cores and finishes faster; a lone memory-bound kernel stays on 1 core; flag off = 1-core behavior.
+2. **Accelerator feeding** (`feed`). Priority bonus for ready CPU kernels whose children are GEMMs planned for the accelerator, larger when the accelerator is idle or about to be, so it does not sit waiting for inputs.
+   - **Validate:** of two equal-rank CPU kernels, the one that unlocks an accelerator GEMM starts first; the GEMM starts earlier and `accel_util` goes up.
+3. **Deliberate delay** (`delay`, last, most distinctive). Allow "start nothing now". Starting a candidate costs its harm, but only harm to critical-path kernels lengthens the makespan, so weight each harmed kernel's extra ns by its criticality (upward rank); waiting costs at most the time until the next event, and nothing for a candidate with slack. Delay when weighted harm > the cost of waiting. Without the criticality weighting it delays too often and gets worse.
+   - **Validate (hand-built):** k0 memory-bound at the head of a long chain (k0 → k2 → k3, k2 compute-bound), k1 memory-bound, short, no children. Without delay k1 slows k0 and the whole chain; with delay k1 waits for k0 and then co-runs with compute-bound k2, and the makespan is shorter. Flag off = plain greedy.
 
 ### 2.6 Re-plan (optional)
-- When the EWMA correction drifts beyond a threshold, re-run the DP on the remaining kernels.
+- When actual times drift from the plan beyond a threshold (EWMA correction, as in `contention_aware.py`), re-solve the ILP on the remaining kernels.
 
 ### 2.7 Experiments
 - **E3** schedule quality: new algorithm vs. the 5 baselines and the optimal schedule, across the five DAG families × low / medium / high contention.
-- **E4** ablation: add 2.3, 2.4, 2.5 (each heuristic) and 2.6 one at a time.
+- **E4** ablation, starting from ESHCS: + whole-DAG ILP with dependencies → + DRAM constraint and adjusted costs → + harm → + pairing → + malleable cores → + accelerator feeding → + deliberate delay → + trigger (same quality, lower average decision cost) → + re-plan. Each step is a flag on the same policy. Report the gain from the non-contention steps (whole-DAG ILP, critical-path priority, malleable cores, feeding) separately from the contention-specific ones (DRAM constraint, adjusted costs, harm, delay, trigger), so the paper states how much of the improvement comes from modeling contention.
+- Fairness and robustness: sweep ESHCS's `hw_share` and report its best; sweep `λ`, the trigger threshold and the override threshold; add noise to the cost model's predictions to see how much accuracy the gains need.
+- Headroom check first: before tuning heuristics, measure how far ESHCS, HEFT and `contention_aware.py` are from optimal across bandwidths; if the gap is small at normal bandwidth, the main result is *when* contention-aware scheduling pays off.
 - Extend **E5**: does the advantage hold across array sizes (16², 32², 64²), scratchpad sizes and DRAM bandwidths?
 - **Tier 2 exit:** E3/E4 figures; paper draft with full evaluation section.
 
@@ -242,7 +295,7 @@ Built one piece at a time; each piece is measured on its own (E4 ablation).
 
 ### 3.1 Analytical hardware cost (`sim/hw_cost.py`)
 - For every scheduler: operations per decision (as a function of queue size, number of resources, DAG size), state kept (tables, counters, bits), estimated decision latency under simple per-operation assumptions.
-- Dispatch-unit feasibility: could it be built from HTS-style queue/select logic, HW HEFT_RT finish-time tracking, MoCA-style bandwidth counters, and Springer 2026 dependency tracking? Which parts stay offline (the DP) and which run per decision.
+- Dispatch-unit feasibility: could it be built from HTS-style queue/select logic, HW HEFT_RT finish-time tracking, MoCA-style bandwidth counters, and Springer 2026 dependency tracking? Which parts stay offline (the ILP) and which run per decision; the cost of the contention trigger vs. the full cost model.
 - Report in HW HEFT_RT's form (decision latency, resource cost), with its 9.144 ns as the reference; LLC contention-tracking counters (~0.66% area) as an extra reference point.
 
 ### 3.2 Dispatch-latency sensitivity

@@ -18,6 +18,8 @@ the policy (1.8) needs 2 methods:
 
 """
 
+import time
+from dataclasses import dataclass
 from sim.engine import Engine, queued
 from sim.cores import CPU, Accelerator
 from sim.kernels import cpu, accelerator
@@ -25,6 +27,13 @@ from sim.memory import allocate, no_degradation
 from sim.model import Job, cpu_segs, accelerator_segs
 
 segment_done = "segment_done"
+
+@dataclass(frozen=True)
+class Run:
+    kind: str #either cpu or accel core
+    num_cores: int #cores assigned to this kernel(0 if accel)
+    alone_ns: float #time it takes with the full dram bandwitdh without any other kernels running
+    bytes: int #bytes its segments move to or and from the dram
 
 class Simulator:
     def __init__(self, config, policy, degradation=no_degradation):
@@ -44,6 +53,10 @@ class Simulator:
         self.children = {} #kernel id to the kernel ids that depend on it
         self.deps_left = {} #kernel id to the set of deps that havent finished yet
         self.arrived = set() #kernel that arrive time has passed
+        self.runs = {} #kernel id to run, filled whenever it starts
+        self.sched_ns = 0.0 #time spent inside the policy
+        self.n_picks = 0 #how many times pick was called
+
 
     @property
     def now(self):
@@ -97,7 +110,9 @@ class Simulator:
 
     def release(self, kernel):
         kernel.ready = self.now
+        t0 = time.perf_counter_ns()
         self.policy.on_queued(kernel, self)
+        self.sched_ns += time.perf_counter_ns() - t0
 
     def on_queued(self, eng, kernel):
         self.advance_jobs()
@@ -118,8 +133,12 @@ class Simulator:
         self.reallocate()
 
     def start_picked(self):
-        for kernel, kind, num_cores in self.policy.pick(self):
-            self.start(kernel, kind, num_cores)
+        t0 = time.perf_counter_ns()
+        picked = self.policy.pick(self)
+        self.sched_ns += time.perf_counter_ns() - t0
+        self.n_picks += 1
+        for kernel, core, n_cores in picked: 
+            self.start(kernel, core, n_cores)
 
     def start(self, kernel, kind, num_cores=1):
         if kernel.kernel_id in self.jobs:
@@ -133,6 +152,8 @@ class Simulator:
         else:
             raise ValueError(f"Unknown resource kind: {kind}")
         self.jobs[kernel.kernel_id] = Job(kernel, segs)
+        peak = self.config.memory.dram_bw_bytes_per_s
+        self.runs[kernel.kernel_id] = Run(kind, num_cores if kind == cpu else 0, sum(s.duration_ns(peak) for s in segs), sum(s.bytes for s in segs))
 
     def finish(self, job):
         kernel = job.kernel
