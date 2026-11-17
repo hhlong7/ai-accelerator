@@ -31,7 +31,7 @@ class Estimate:
 
 
 class Lane:
-    def __init___(self, segments, idx=0, left=1.0):
+    def __init__(self, segments, idx=0, left=1.0):
         self.segments = segments
         self.idx = idx
         self.left = left
@@ -61,7 +61,7 @@ def segments(kernel, kind, sim, num_cores=1):
 #the running jobs as lanes, the ones finishing exactly now are left out
 def running_lanes(sim):
     lanes = {}
-    for kid, job in sim.jobs.item():
+    for kid, job in sim.jobs.items():
         lane = Lane(job.segments, job.idx, job.left)
         if not lane.done:
             lanes[kid] = lane
@@ -69,7 +69,7 @@ def running_lanes(sim):
 
 
 def play(lanes, memory, degradation):
-    lanes = {kid: Lane(l.segments, l.idx, l.left) for kid, l in lanes.item()}
+    lanes = {kid: Lane(l.segments, l.idx, l.left) for kid, l in lanes.items()}
     t, finish = 0.0, {}
     while lanes:
         shares = allocate({kid: l.segment.demand() for kid, l in lanes.items()}, memory, degradation)
@@ -92,12 +92,12 @@ def what_if(kernel, kind, sim, num_cores=1, starting=()):
     lanes = running_lanes(sim)
     for k, where, n in starting:
         lanes[k.kernel_id] = Lane(segments(k, where, sim, n or 1))
-        memory, degradation = sim.config.memory, sim.degradation-
-        before = play(lanes, memory, degradation)
-        lanes[kernel.kernel_id] = Lane(segments(kernel, kind, sim, num_cores))
-        after = play(lanes, memory, degradation)
-        harm_by = {kid: after[kid] - before[kid] for kid in before}
-        return Estimate(after[kernel.kernel_id], harm_by)
+    memory, degradation = sim.config.memory, sim.degradation
+    before = play(lanes, memory, degradation)
+    lanes[kernel.kernel_id] = Lane(segments(kernel, kind, sim, num_cores))
+    after = play(lanes, memory, degradation)
+    harm_by = {kid: after[kid] - before[kid] for kid in before}
+    return Estimate(after[kernel.kernel_id], harm_by)
 
 """
 Lane is a throwaway copy of a job’s progress, so the replay never changes the real simulation.
