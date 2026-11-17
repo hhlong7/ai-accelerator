@@ -1,6 +1,6 @@
 import pytest
 
-from sim.kernels import make_gmm_kernel, make_simple_kernel, general_mat_mul_kernel, simple, cpu, accelerator, chain
+from sim.kernels import make_gmm_kernel, make_simple_kernel, general_mat_mul_kernel, simple, cpu, accelerator, chain, topological
 
 
 #gemm 64x128x32 fp16 by hand:
@@ -105,3 +105,14 @@ def test_ready_wait():
     k.ready, k.start = 20.00, 30.00
     assert k.wait == 25.00
     assert k.ready_wait == 10.00
+
+
+# for kernels-optimal.b
+# inward tree: 0 depends on 1 and 2, but it's 
+# listed first. after sorting every dep comes first
+def test_topological_puts_deps_first():
+    ks = [make_simple_kernel(0, 10, 0.0, deps = [1,2]),
+          make_simple_kernel(1, 10, 0.0, deps = [3]),
+          make_simple_kernel(2, 10, 0.0),
+          make_simple_kernel(3, 10, 0.0)]
+    assert [k.kernel_id for k in topological(ks)] == [2, 3, 1, 0]
