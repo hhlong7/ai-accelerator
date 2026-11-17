@@ -115,7 +115,7 @@ def lower_bounds(kernels, config, core_options = (1,)):
             "cpu_work": first + cpu_work / n_cores,}
 
 def lower_bound(kernels, config, core_options = (1,)):
-    return max(lower_bound(kernels, config, core_options).values())
+    return max(lower_bounds(kernels, config, core_options).values())
 
 
 
