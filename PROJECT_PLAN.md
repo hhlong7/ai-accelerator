@@ -34,8 +34,8 @@ Each tier ends with a complete, writable paper. Never start a tier until the pre
 |---|---|
 | 1 (Nov 9) | Dependencies in the simulator; 1.9 DAG workloads; 1.10 metrics; start `eshcs.py` |
 | 2 (Nov 16) | `eshcs.py`, `optimal.py` + lower bounds; 1.11 harness; first E1/E2 runs; 1.7 measurements in parallel |
-| 3 (Nov 23, short week) | Tier 2: cost model, greedy dispatch with a placeholder plan, pluggable priority (upward, ESHCS), malleable cores, accelerator feeding; ILP allocation + lower-bound priority; first E3 results |
-| 4 (Nov 30) | Tier 2: rollout search, heuristic tuning (deliberate delay, harm/pairing + trigger), E4 ablation, E5 sweep; Tier 3 hardware cost table |
+| 3 (Nov 23, short week) | Tier 2 (cost model and greedy skeleton done Nov 18): (1) pluggable priority (upward, lower-bound, ESHCS) by Nov 22; (2) ILP allocation + contention-adjusted costs; experiment harness; first E3 results |
+| 4 (Nov 30) | Tier 2: (3) rollout search `rollout_k` = 0, 1, 2, 3, full; (4) heuristics (malleable cores, feeding, delay, harm/pairing + trigger); E4 ablation, E5 sweep; Tier 3 hardware cost table |
 | 5 (Dec 7) | Final experiments, paper, presentation |
 
 ## Languages and tools
@@ -211,10 +211,13 @@ OFFLINE (once per DAG)
 ONLINE (every pick)
   greedy       ready kernels by priority -> planned resource, cost-model override (2.4)
   rollout      top-k candidates (+ "wait"), each finished with the greedy, keep the best (2.4b)
+               k = 0 (plain greedy), 1, 2, 3, full (every ready candidate)
   heuristics   flags, tuned later (2.5): malleable cores, feeding, delay, harm/pairing, trigger
 EVALUATION (not part of the algorithm)
   A* / DFBnB optimum on small DAGs, lower bounds on large ones (1.8)
 ```
+
+**Build order (2026-11-18):** greedy skeleton (done) → (1) pluggable priority: upward, lower-bound, ESHCS (2.3b) → (2) ILP plan + contention-adjusted costs (2.3) → (3) rollout, `rollout_k` = 0, 1, 2, 3, full (2.4b) → (4) heuristics (2.5). All offline parts are finished before the rollout, so it is tested on the final plan and ranks.
 
 Rejected for the online part: full A* (exponential per decision, no dispatch-unit story, breaks the step-by-step comparison with ESHCS) and MCTS (the simulator is deterministic, randomness adds nothing). Optional extras if time allows: batch matching (assign all ready kernels at once), PEFT and sufferage as extra baselines, a DRAM price from the ILP's LP dual as the harm weight.
 
@@ -279,14 +282,15 @@ In one sentence: ESHCS treats runtimes as fixed and plans by speedup; the new al
 
 ### 2.3b Priority (offline, pluggable)
 - One score per kernel, computed once; `ContentionILP(kernels, priority=...)`. Ties broken by descendant count (more kernels unlocked first).
+- Every rank function takes a `cost` table `{kernel_id: {cpu: ns, accelerator: ns}}` instead of calling `standalone_ns` itself. `prepare()` builds it once: standalone times first, the contention-adjusted times from 2.3 once they exist. So all three ranks are built now and become contention-aware without changes when 2.3 lands.
 - `upward` (default): own planned time + the biggest child rank (critical path, as in HEFT).
-- `eshcs`: the partner's eq 11 (urgency + successor rank) from `eshcs.py`. Same dispatch, only the priority changes, so the ablation isolates the priority.
-- `lower_bound` (new, contention-aware): `max(upward rank, downstream bytes / peak_bw, downstream work / (n_cores + 1))`, a lower bound on finishing everything after the kernel (the per-kernel form of `optimal.lower_bounds`). Downstream = every descendant counted once. Uses the ILP's contention-adjusted costs, so it is built after the ILP.
+- `eshcs`: the partner's eqs 5-11 from `eshcs.py` (`successors` → `earliest_start` → `critical_path` as the deadline → `latest_finish` → `successor_rank` → `priorities`), with `et` = the planned resource's time from `cost`. Same dispatch, only the priority changes, so the ablation isolates the priority. Urgency depends on `now`: first version static (computed once at `now = 0`, equal to urgency at each kernel's earliest start); a `dynamic` option recomputes it in `pick()` for the ready kernels, as the paper does, so the ESHCS comparison is fair.
+- `lower_bound` (new, contention-aware): `max(upward rank, downstream bytes / peak_bw, downstream work / (n_cores + 1))`, a lower bound on finishing everything after the kernel (the per-kernel form of `optimal.lower_bounds`). Downstream = every descendant counted once. Built with standalone costs first; uses the adjusted costs automatically after 2.3.
 - Compared without rollout first; the best one is used inside the rollout (it chooses the top-k candidates and drives the greedy that finishes every branch).
 - **Validate:** hand-built chains for `upward`; a short chain with heavy downstream traffic outranks a longer compute-only chain under `lower_bound` but not under `upward`.
 
 ### 2.4 Greedy online dispatch
-- **Build order: online part first.** The greedy dispatch and the heuristics only *read* a placement plan, so they are built and measured before the ILP, with a placeholder plan (a GEMM goes on the accelerator if it is faster there alone). The ILP plan (2.3) is swapped in afterwards without changing the online code.
+- **Done (2026-11-18, `sim/policies/p1_ilp.py`):** the greedy skeleton with a placeholder plan (`core_plan`: a GEMM goes on the accelerator if it is faster there alone), upward rank, and the cost-model override. The greedy only *reads* the plan, so the ILP plan (2.3) is swapped in afterwards without changing the online code.
 - Ready kernels by priority (upward rank); each goes where the plan placed it, unless that resource is busy, another is free, and the cost model shows a gain above a threshold (override).
 - Each heuristic in 2.5 is a constructor flag (e.g. `ContentionILP(delay=False, malleable=False, feed=False)`), so the E4 ablation is the same policy with flags switched on one at a time.
 - **Validate:** with an infinite threshold it follows the plan exactly; with every flag off it matches the plain greedy dispatch.
@@ -295,7 +299,7 @@ In one sentence: ESHCS treats runtimes as fixed and plans by speedup; the new al
 - At a pick, the candidates are the top-k ready kernels by priority, each on its planned resource and on the other one if it is free, plus "wait until the next event". For each candidate: copy the simulation state, apply the move, finish the whole DAG with the greedy (2.4), record the makespan. Start the candidate with the best makespan; ties go to the greedy's choice.
 - With the greedy as the base policy the rollout is never worse than the greedy (cost-improvement property, Bertsekas). "Wait" as a move makes it find deliberate delays on its own, a principled version of heuristic 3.
 - State copy: `copy.deepcopy(sim)` first; fallback: record every `pick()` result and replay the prefix from t = 0 (the simulator is deterministic).
-- Flags: `rollout_k` (0 = off) and run it only when the contention trigger fires, to bound the cost.
+- `rollout_k` = 0 (off, plain greedy), 1, 2, 3, or `"full"` (every ready kernel on every free resource, plus "wait"; still a one-step rollout, not a full tree search, which is the A* optimum). Optionally run it only when the contention trigger fires, to bound the cost.
 - Cost: about decisions × candidates × one full simulation. Software only, not a dispatch-unit design; reported as a quality vs. `sched_ns` curve over k.
 - **Validate:** a rollout with no changes reproduces the greedy's makespan exactly; never worse than the greedy on all five families and several seeds; finds the delay win on the hand-built case from 2.5 heuristic 3.
 
@@ -318,7 +322,7 @@ In one sentence: ESHCS treats runtimes as fixed and plans by speedup; the new al
 
 ### 2.7 Experiments
 - **E3** schedule quality: new algorithm vs. the 5 baselines and the optimal schedule, across the five DAG families × low / medium / high contention.
-- **E4** ablation, starting from ESHCS: + whole-DAG ILP with dependencies → + DRAM constraint and adjusted costs → + priority (ESHCS → upward → lower-bound) → + harm → + pairing → + malleable cores → + accelerator feeding → + deliberate delay → + trigger (same quality, lower average decision cost) → + re-plan → + rollout (k = 1, 2, 4; software only). Compare rollout's found delays against the deliberate-delay heuristic. Each step is a flag on the same policy. Report the gain from the non-contention steps (whole-DAG ILP, critical-path priority, malleable cores, feeding) separately from the contention-specific ones (DRAM constraint, adjusted costs, harm, delay, trigger), so the paper states how much of the improvement comes from modeling contention.
+- **E4** ablation, starting from ESHCS: + whole-DAG ILP with dependencies → + DRAM constraint and adjusted costs → + priority (ESHCS → upward → lower-bound) → + harm → + pairing → + malleable cores → + accelerator feeding → + deliberate delay → + trigger (same quality, lower average decision cost) → + re-plan → + rollout (k = 1, 2, 3, full; software only). Compare rollout's found delays against the deliberate-delay heuristic. Each step is a flag on the same policy. Report the gain from the non-contention steps (whole-DAG ILP, critical-path priority, malleable cores, feeding) separately from the contention-specific ones (DRAM constraint, adjusted costs, harm, delay, trigger), so the paper states how much of the improvement comes from modeling contention.
 - Fairness and robustness: sweep ESHCS's `hw_share` and report its best; sweep `λ`, the trigger threshold and the override threshold; add noise to the cost model's predictions to see how much accuracy the gains need.
 - Headroom check first: before tuning heuristics, measure how far ESHCS, HEFT and `contention_aware.py` are from optimal (A*/DFBnB) across bandwidths. First data point (2026-11-18, greedy skeleton with placeholder plan): 0-17% above the lower bound at 10 GB/s, at most 3% at 2 GB/s on the default DAG sizes; if the gap is small at normal bandwidth, the main result is *when* contention-aware scheduling pays off.
 - Extend **E5**: does the advantage hold across array sizes (16², 32², 64²), scratchpad sizes and DRAM bandwidths?
