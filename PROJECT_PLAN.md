@@ -35,7 +35,7 @@ Each tier ends with a complete, writable paper. Never start a tier until the pre
 | 1 (Nov 9) | Dependencies in the simulator; 1.9 DAG workloads; 1.10 metrics; start `eshcs.py` |
 | 2 (Nov 16) | `eshcs.py`, `optimal.py` + lower bounds; 1.11 harness; first E1/E2 runs; 1.7 measurements in parallel |
 | 3 (Nov 23, short week) | Tier 2 (cost model and greedy skeleton done Nov 18): (1) pluggable priority (upward, lower-bound, ESHCS) by Nov 22; (2) ILP allocation + contention-adjusted costs; experiment harness; first E3 results |
-| 4 (Nov 30) | Tier 2: (3) rollout search `rollout_k` = 0, 1, 2, 3, full; (4) heuristics (malleable cores, feeding, delay, harm/pairing + trigger); E4 ablation, E5 sweep; Tier 3 hardware cost table |
+| 4 (Nov 30) | Tier 2: (3) rollout search `rollout_k` = 0, 1, 2, 3, full; (4) heuristics (malleable cores, feeding, delay, harm/pairing + trigger); (5) re-plan + noise knob if time allows; E4 ablation, E5 sweep; Tier 3 hardware cost table |
 | 5 (Dec 7) | Final experiments, paper, presentation |
 
 ## Languages and tools
@@ -213,11 +213,13 @@ ONLINE (every pick)
   rollout      top-k candidates (+ "wait"), each finished with the greedy, keep the best (2.4b)
                k = 0 (plain greedy), 1, 2, 3, full (every ready candidate)
   heuristics   flags, tuned later (2.5): malleable cores, feeding, delay, harm/pairing, trigger
+  re-plan      optional (2.6): actual times drift past a threshold -> correct the costs,
+               re-solve the ILP on the kernels not started yet, recompute the priority
 EVALUATION (not part of the algorithm)
   A* / DFBnB optimum on small DAGs, lower bounds on large ones (1.8)
 ```
 
-**Build order (2026-11-18):** greedy skeleton (done) → (1) pluggable priority: upward, lower-bound, ESHCS (2.3b) → (2) ILP plan + contention-adjusted costs (2.3) → (3) rollout, `rollout_k` = 0, 1, 2, 3, full (2.4b) → (4) heuristics (2.5). All offline parts are finished before the rollout, so it is tested on the final plan and ranks.
+**Build order (2026-11-18):** greedy skeleton (done) → (1) pluggable priority: upward, lower-bound, ESHCS (2.3b) → (2) ILP plan + contention-adjusted costs (2.3) → (3) rollout, `rollout_k` = 0, 1, 2, 3, full (2.4b) → (4) heuristics (2.5) → (5) optional re-plan (2.6), only if the ILP lands on time; otherwise it stays future work (4.3). All offline parts are finished before the rollout, so it is tested on the final plan and ranks.
 
 Rejected for the online part: full A* (exponential per decision, no dispatch-unit story, breaks the step-by-step comparison with ESHCS) and MCTS (the simulator is deterministic, randomness adds nothing). Optional extras if time allows: batch matching (assign all ready kernels at once), PEFT and sufferage as extra baselines, a DRAM price from the ILP's LP dual as the harm weight.
 
@@ -317,13 +319,22 @@ In one sentence: ESHCS treats runtimes as fixed and plans by speedup; the new al
 3. **Deliberate delay** (`delay`, last, most distinctive). Allow "start nothing now". Starting a candidate costs its harm, but only harm to critical-path kernels lengthens the makespan, so weight each harmed kernel's extra ns by its criticality (upward rank); waiting costs at most the time until the next event, and nothing for a candidate with slack. Delay when weighted harm > the cost of waiting. Without the criticality weighting it delays too often and gets worse.
    - **Validate (hand-built):** k0 memory-bound at the head of a long chain (k0 → k2 → k3, k2 compute-bound), k1 memory-bound, short, no children. Without delay k1 slows k0 and the whole chain; with delay k1 waits for k0 and then co-runs with compute-bound k2, and the makespan is shorter. Flag off = plain greedy.
 
-### 2.6 Re-plan (optional)
-- When actual times drift from the plan beyond a threshold (EWMA correction, as in `contention_aware.py`), re-solve the ILP on the remaining kernels.
+### 2.6 Re-plan (optional, decided 2026-11-20)
+- **Why:** the plan is built on estimates (contention-adjusted costs are averages over expected co-runners; the ILP's `T` ignores who waits for which resource). On real hardware predictions are never exact, so a plan that cannot change goes stale.
+- **Drift check:** when a kernel finishes, compare its actual time with `cost[kid][resource]`; keep a running error (EWMA, as in `contention_aware.py`). Re-plan when the error passes a threshold (e.g. 10-20%), at most once per finished kernel.
+- **Re-plan:**
+  1. Correct the cost table with the observed error, so the new plan does not repeat the old mistake.
+  2. Re-solve the ILP (2.3) on the kernels that have not started; finished and running kernels are fixed, and their (predicted) finish times become earliest-start constraints for their children.
+  3. Recompute the priority (2.3b) on the new plan.
+- The online part (greedy, rollout, heuristics) is unchanged; it reads the new `self.plan`, `self.cost` and `self.rank`. Constructor flag `replan=False` (off by default) plus the threshold.
+- **Drift in the simulator:** the simulator runs the same rate model the cost model replays, so drift only comes from the plan's estimates. To show the value of re-planning, add a noise knob: actual segment times = predicted × a random factor (±10, 25, 50%, seeded). The policy only sees the predictions.
+- **Cost:** one ILP solve per trigger (small for 14-20 kernel DAGs); report the number of re-plans and total solve time next to the makespan. Stays on the software / host side, like the ILP (Tier 3).
+- **Validate:** threshold = infinity reproduces the run without re-planning exactly; with no noise it rarely or never triggers; on a hand-built case where one kernel takes 2× its estimate, the re-plan moves a later kernel to the other resource and the makespan is shorter.
 
 ### 2.7 Experiments
 - **E3** schedule quality: new algorithm vs. the 5 baselines and the optimal schedule, across the five DAG families × low / medium / high contention.
 - **E4** ablation, starting from ESHCS: + whole-DAG ILP with dependencies → + DRAM constraint and adjusted costs → + priority (ESHCS → upward → lower-bound) → + harm → + pairing → + malleable cores → + accelerator feeding → + deliberate delay → + trigger (same quality, lower average decision cost) → + re-plan → + rollout (k = 1, 2, 3, full; software only). Compare rollout's found delays against the deliberate-delay heuristic. Each step is a flag on the same policy. Report the gain from the non-contention steps (whole-DAG ILP, critical-path priority, malleable cores, feeding) separately from the contention-specific ones (DRAM constraint, adjusted costs, harm, delay, trigger), so the paper states how much of the improvement comes from modeling contention.
-- Fairness and robustness: sweep ESHCS's `hw_share` and report its best; sweep `λ`, the trigger threshold and the override threshold; add noise to the cost model's predictions to see how much accuracy the gains need.
+- Fairness and robustness: sweep ESHCS's `hw_share` and report its best; sweep `λ`, the trigger threshold and the override threshold; add noise to the cost model's predictions to see how much accuracy the gains need. With re-plan (2.6): makespan with and without re-planning as the noise grows (±10, 25, 50%).
 - Headroom check first: before tuning heuristics, measure how far ESHCS, HEFT and `contention_aware.py` are from optimal (A*/DFBnB) across bandwidths. First data point (2026-11-18, greedy skeleton with placeholder plan): 0-17% above the lower bound at 10 GB/s, at most 3% at 2 GB/s on the default DAG sizes; if the gap is small at normal bandwidth, the main result is *when* contention-aware scheduling pays off.
 - Extend **E5**: does the advantage hold across array sizes (16², 32², 64²), scratchpad sizes and DRAM bandwidths?
 - **Tier 2 exit:** E3/E4 figures; paper draft with full evaluation section.
@@ -364,6 +375,9 @@ Kept for the paper's Future work section and for continuing the project.
 ### 4.2 SystemVerilog dispatch unit (old Tier 4)
 - Fixed-point golden model of the chosen algorithm's online part; RTL modules (`kernel_queue.sv`, `history_table.sv`, `bw_monitor.sv`, `dispatch_unit.sv`).
 - Verilator co-simulation against the golden model (bit-exact), Yosys synthesis, area/timing vs. HW HEFT_RT; measured latency fed back into the simulator.
+
+### 4.3 Re-planning (if not built in 2.6)
+- Re-solve the ILP mid-run on the unstarted kernels when actual times drift from the plan; evaluated under noisy predictions. Design in 2.6.
 
 ---
 
