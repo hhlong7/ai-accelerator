@@ -21,7 +21,7 @@ from sim.estimate import fits_accel
 from sim.policies.base import Policy
 from sim.policies.cost_model import what_if, running_lanes, play, Lane, segments
 from sim.policies.gchill.costs import cost_table, adjusted_cost_table
-from sim.policies.gchill.plan import core_plan
+from sim.policies.gchill.plan import core_plan, ilp_plan
 from sim.policies.gchill.priority import descendants, PRIORITY
 
 
@@ -38,7 +38,7 @@ def free_in(kind, sim, starting):
 
 
 class ContentionILP(Policy):
-    def __init__(self, kernels, override=True, priority="upward", adjusted=True):
+    def __init__(self, kernels, override=True, priority="upward", adjusted=True, ilp=True):
         if priority not in PRIORITY:
             raise ValueError(f"Unknown priority: {priority}, pick one of {list(PRIORITY)}")
         self.kernels = topological(kernels)
@@ -50,6 +50,11 @@ class ContentionILP(Policy):
         self.n_desc = None #how many kernels come after it, break ties in rank
         self.ready = [] #released, not started yet
         self.adjusted = adjusted
+        self.ilp = ilp #true = ilp plan, else fastest alone (core plan)
+        self.T = None #ilp estimated makespan, none without the ilp
+        self.solve_ms = None #how long making the plan took (one time cost)
+
+
 
     #offline phase, runs once. needs sim for the hardware, so it waits for the 1st arrival
 
@@ -102,6 +107,12 @@ class ContentionILP(Policy):
     def prepare(self, sim):
         table = adjusted_cost_table if self.adjusted else cost_table
         self.cost = table(self.kernels, sim)
-        self.plan = core_plan(self.kernels, self.cost)
+        start = time.perf_counter()
+        if self.ilp:
+            self.plan, self.T = ilp_plan(self.kernels, self.cost, sim)
+        else:
+            self.plan = core_plan(self.kernels, self.cost)
+        self.solve_ms = (time.perf_counter() - start) * 1e3
         self.rank = PRIORITY[self.priority](self.kernels, self.plan, self.cost, sim)
         self.n_desc = {kid: len(d) for kid, d in descendants(self.kernels).items()}
+        

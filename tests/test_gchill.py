@@ -7,9 +7,10 @@ from sim.workload import tree, fork_join, random_dag, fft, gaussian_elimination
 from sim.policies.base import Policy
 from sim.policies.gchill.ilp import ContentionILP
 from sim.policies.gchill.costs import cost_table, adjusted_cost_table, shared_ns
-from sim.policies.gchill.plan import core_plan
+from sim.policies.gchill.plan import core_plan, ilp_plan
 from sim.policies.gchill.priority import descendants, upward_rank, lower_bound_rank, eshcs_rank, PRIORITY
 from sim.policies.optimal import lower_bound
+from sim.policies.cost_model import segments
 
 
 #same system as the other tests: 2 cores at 10 gflops, 32 x 32 array at 1 GHz, 10 GB/s dram
@@ -73,7 +74,7 @@ def test_critical_path_first():
 @pytest.mark.parametrize("override, where", [(True, cpu), (False, accelerator)])
 def test_override(override, where):
     ks = [make_gmm_kernel(0, 64, 64, 64, arrival=0.0), make_gmm_kernel(1, 2, 32, 32, arrival=10.0)]
-    run(ks, ContentionILP(ks, override=override))
+    run(ks, ContentionILP(ks, override=override, ilp=False))
     assert ks[0].resource == accelerator
     assert ks[1].resource == where
     if where == accelerator:
@@ -214,3 +215,60 @@ def test_more_co_runners_never_faster():
         times = [shared_ns(k, where, hw, n, 5e9) for n in range(4)]
         assert times[0] == pytest.approx(cost_table([k], hw)[0][where])
         assert times == sorted(times)
+
+
+#the ilp's own estimate for a plan: the biggest of its 4 terms (chain, accelerator, cpu, dram)
+def estimate(kernels, plan, cost, sim):
+    peak = sim.config.memory.dram_bw_bytes_per_s
+    chain = max(upward_rank(kernels, plan, cost).values())
+    acc = sum(cost[k.kernel_id][accelerator] for k in kernels if plan[k.kernel_id] == accelerator)
+    cpu_work = sum(cost[k.kernel_id][cpu] for k in kernels if plan[k.kernel_id] == cpu)
+    nbytes = sum(sum(s.bytes for s in segments(k, plan[k.kernel_id], sim)) for k in kernels)
+    return max(chain, acc, cpu_work / sim.config.cores.n_cores, nbytes / peak * 1e9)
+
+
+#the big gemm already fills the accelerator, so the ilp puts the small one on the free cpu,
+#where fastest-alone would queue both on the accelerator
+def test_ilp_balances_the_accelerator():
+    hw = Simulator(make_system(), Policy())
+    ks = [make_gmm_kernel(0, 64, 64, 64, arrival=0.0), make_gmm_kernel(1, 2, 32, 32, arrival=0.0)]
+    cost = cost_table(ks, hw)
+    assert core_plan(ks, cost) == {0: accelerator, 1: accelerator}
+    plan, T = ilp_plan(ks, cost, hw)
+    assert plan == {0: accelerator, 1: cpu}
+    assert T == pytest.approx(estimate(ks, plan, cost, hw))
+
+
+#nothing fits the accelerator => everything on the cpu
+def test_ilp_cpu_only():
+    hw = Simulator(make_system(), Policy())
+    ks = [make_simple_kernel(0, 1000, arrival=0.0), make_simple_kernel(1, 2000, arrival=0.0, deps=(0,))]
+    plan, _ = ilp_plan(ks, cost_table(ks, hw), hw)
+    assert plan == {0: cpu, 1: cpu}
+
+
+#the ilp is optimal for its own estimate: never above fastest-alone, its T is its plan's estimate,
+#and the relaxed version (x in [0, 1]) is never above the integer one
+@pytest.mark.parametrize("make", families)
+def test_ilp_optimal_on_its_estimate(make):
+    ks = topological(make())
+    hw = Simulator(make_system(), Policy())
+    cost = adjusted_cost_table(ks, hw)
+    plan, T = ilp_plan(ks, cost, hw)
+    _, relaxed = ilp_plan(ks, cost, hw, relax=True)
+    assert T == pytest.approx(estimate(ks, plan, cost, hw), rel=1e-6)
+    assert T <= estimate(ks, core_plan(ks, cost), cost, hw) + 1e-6
+    assert relaxed <= T + 1e-6
+
+
+#ilp=False keeps the fastest-alone plan, and the policy reports the ilp's estimate and solve time
+def test_ilp_flag():
+    ks = random_dag(seed=0)
+    on = ContentionILP(ks)
+    run(ks, on)
+    assert on.T > 0 and on.solve_ms >= 0
+    ks = random_dag(seed=0)
+    off = ContentionILP(ks, ilp=False)
+    run(ks, off)
+    assert off.plan == core_plan(off.kernels, off.cost)
+    assert off.T is None
