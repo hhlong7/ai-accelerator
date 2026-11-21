@@ -6,7 +6,7 @@ from sim.simulator import Simulator
 from sim.workload import tree, fork_join, random_dag, fft, gaussian_elimination
 from sim.policies.base import Policy
 from sim.policies.p1_ilp import (ContentionILP, cost_table, descendants, core_plan, upward_rank,
-                                 lower_bound_rank, eshcs_rank, PRIORITY)
+                                 lower_bound_rank, eshcs_rank, PRIORITY, adjusted_cost_table, shared_ns)
 from sim.policies.optimal import lower_bound
 
 
@@ -179,3 +179,36 @@ def test_tie_break_by_descendants():
 def test_unknown_priority():
     with pytest.raises(ValueError):
         ContentionILP([make_simple_kernel(0, 1000, arrival=0.0)], priority="fastest")
+
+#a chain never runs 2 kernels at once => nothing to share, same as alone
+def test_adjusted_chain_is_alone():
+    hw = Simulator(make_system(), Policy())
+    ks = [make_simple_kernel(0, 1000, arrival=0.0),
+          make_simple_kernel(1, 1000, arrival=0.0, deps=(0,)),
+          make_simple_kernel(2, 1000, arrival=0.0, deps=(1,))]
+    alone, adj = cost_table(ks, hw), adjusted_cost_table(ks, hw)
+    for kid in alone:
+        assert adj[kid] == pytest.approx(alone[kid])
+
+
+#sharing dram can only slow a kernel down, and the table keeps the same kernels and resources
+@pytest.mark.parametrize("make", families)
+def test_adjusted_never_faster(make):
+    ks = topological(make())
+    hw = Simulator(make_system(), Policy())
+    alone, adj = cost_table(ks, hw), adjusted_cost_table(ks, hw)
+    assert adj.keys() == alone.keys()
+    for kid in alone:
+        assert adj[kid].keys() == alone[kid].keys()
+        for where in alone[kid]:
+            assert adj[kid][where] >= alone[kid][where] - 1e-6
+
+
+#0 co-runners = standalone, and each extra co-runner never makes it faster
+def test_more_co_runners_never_faster():
+    hw = Simulator(make_system(), Policy())
+    k = make_gmm_kernel(0, 64, 64, 64, arrival=0.0)
+    for where in (cpu, accelerator):
+        times = [shared_ns(k, where, hw, n, 5e9) for n in range(4)]
+        assert times[0] == pytest.approx(cost_table([k], hw)[0][where])
+        assert times == sorted(times)

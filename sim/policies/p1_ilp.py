@@ -20,6 +20,7 @@ from sim.estimate import fits_accel, standalone_ns
 from sim.policies.base import Policy
 from sim.policies.cost_model import what_if, running_lanes, play, Lane, segments
 from sim.policies.eshcs import successors, earliest_start, critical_path, latest_finish, successor_rank, priorities
+from sim.memory import allocate
 
 
 #{kernel id: {resource: ns alone}}, only the resources the kernel can run on. every rank and the
@@ -54,6 +55,52 @@ def core_plan(kernels, cost):
         plan[k.kernel_id] = accelerator if on_accel else cpu 
     return plan
 
+
+#how many other kernels run next to a kernel on average: tot work / longest chain - itself, capped at the cores. 
+#fraction => 0.4 = it shares dram for 40% of its run
+def overlap(kernels, plan, cost, n_cores):
+    work = sum(cost[k.kernel_id][plan[k.kernel_id]] for k in kernels)
+    span = max(upward_rank(kernels, plan, cost).values())
+    return min(n_cores, max(0.0, work / span - 1))
+
+#bytes per sec a typical co runner pulls: each kernel's bytes / its time alone avg
+def typical_demand(kernels, plan, cost, sim):
+    bws = []
+    for k in kernels:
+        kid = k.kernel_id
+        nbytes = sum(s.bytes for s in segments(k, plan[kid], sim))
+        bws.append(nbytes / cost[kid][plan[kid]] * 1e9)
+    return sum(bws) / len(bws)
+
+#ns on this resource next to others typical corunners, segment by segment like the simulator
+def shared_ns(kernel, where, sim, others, demand):
+    total = 0.0
+    for seg in segments(kernel, where, sim):
+        wants = {"me": seg.demand()}
+        for i in range(others):
+            wants[i] = demand
+        bw = allocate(wants, sim.config.memory, sim.degradation)["me"]
+        total += seg.duration_ns(bw)
+    return total
+
+
+#same shape as cost table, but each time counts the expected dram sharing
+def adjusted_cost_table(kernels, sim):
+    alone = cost_table(kernels, sim)
+    plan = core_plan(kernels, alone)
+    others = overlap(kernels, plan, alone, sim.config.cores.n_cores)
+    demand = typical_demand(kernels, plan, alone, sim)
+    lo, frac = int(others), others - int(others)
+    cost = {}
+    for k in kernels:
+        kid = k.kernel_id
+        cost[kid] = {}
+        for where in alone[kid]:
+            t = shared_ns(k, where, sim, lo, demand)
+            if frac > 0:
+                t = (1 - frac) * t + frac * shared_ns(k, where, sim, lo + 1, demand)
+            cost[kid][where] = t
+    return cost
 
 #upward rank: own planned time + the biggest rank of any child
 #kernels = topological order
@@ -134,7 +181,7 @@ def free_in(kind, sim, starting):
 
 
 class ContentionILP(Policy):
-    def __init__(self, kernels, override=True, priority="upward"):
+    def __init__(self, kernels, override=True, priority="upward", adjusted=True):
         if priority not in PRIORITY:
             raise ValueError(f"Unknown priority: {priority}, pick one of {list(PRIORITY)}")
         self.kernels = topological(kernels)
@@ -145,13 +192,9 @@ class ContentionILP(Policy):
         self.rank = None #{kernel id: upward rank in ns}
         self.n_desc = None #how many kernels come after it, break ties in rank
         self.ready = [] #released, not started yet
+        self.adjusted = adjusted
 
     #offline phase, runs once. needs sim for the hardware, so it waits for the 1st arrival
-    def prepare(self, sim):
-        self.cost = cost_table(self.kernels, sim)
-        self.plan = core_plan(self.kernels, self.cost)
-        self.rank = PRIORITY[self.priority](self.kernels, self.plan, self.cost, sim)
-        self.n_desc = {kid: len(d) for kid, d in descendants(self.kernels).items()}
 
     def on_queued(self, kernel, sim):
         if self.plan is None:
@@ -198,5 +241,12 @@ class ContentionILP(Policy):
             self.ready.remove(kernel)
 
         return picks
+
+    def prepare(self, sim):
+        table = adjusted_cost_table if self.adjusted else cost_table
+        self.cost = table(self.kernels, sim)
+        self.plan = core_plan(self.kernels, self.cost)
+        self.rank = PRIORITY[self.priority](self.kernels, self.plan, self.cost, sim)
+        self.n_desc = {kid: len(d) for kid, d in descendants(self.kernels).items()}
 
 
