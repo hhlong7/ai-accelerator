@@ -5,8 +5,10 @@ from sim.kernels import make_gmm_kernel, make_simple_kernel, cpu, accelerator, f
 from sim.simulator import Simulator
 from sim.workload import tree, fork_join, random_dag, fft, gaussian_elimination
 from sim.policies.base import Policy
-from sim.policies.p1_ilp import (ContentionILP, cost_table, descendants, core_plan, upward_rank,
-                                 lower_bound_rank, eshcs_rank, PRIORITY, adjusted_cost_table, shared_ns)
+from sim.policies.gchill.ilp import ContentionILP
+from sim.policies.gchill.costs import cost_table, adjusted_cost_table, shared_ns
+from sim.policies.gchill.plan import core_plan
+from sim.policies.gchill.priority import descendants, upward_rank, lower_bound_rank, eshcs_rank, PRIORITY
 from sim.policies.optimal import lower_bound
 
 
